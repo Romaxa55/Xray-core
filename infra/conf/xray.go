@@ -364,6 +364,10 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 				}
 				senderSettings.StreamSettings.SocketSettings.DomainStrategy = internet.DomainStrategy_USE_IP46
 			}
+			if senderSettings.TargetStrategy != internet.DomainStrategy_AS_IS {
+				errors.LogWarning(context.Background(), `The "freedom" outbound "privacyGuard" overrides the existing "targetStrategy". Please update your config(s) if this is unintended.`)
+				senderSettings.TargetStrategy = internet.DomainStrategy_AS_IS
+			}
 			if c.ProxySettings != nil && !c.ProxySettings.TransportLayerProxy {
 				errors.LogWarning(context.Background(), `The "freedom" outbound "privacyGuard" cannot be applied correctly when "proxySettings.transportLayer" is false. Please update your config(s); the current combination is misconfigured.`)
 			}
