@@ -1,27 +1,38 @@
 package errors
 
-import (
-	"context"
-)
+// MegaV-patch 2026-05-19: deprecated-feature warnings выпилены.
+//
+// xray-core печатает "WebSocket transport is deprecated", "Trojan (no Flow)
+// is deprecated", "gRPC transport is deprecated" и т.п. на КАЖДЫЙ outbound.
+// Это десятки строк спама на connect, скрывают наши полезные логи.
+//
+// Backend всё ещё держит много ws/grpc/trojan серверов в pool'е, миграция
+// на xhttp h2/h3 — отдельная задача (нужны новые серверы).
+//
+// Функции оставлены как no-op чтобы не ломать call-sites в xray-core
+// (transport_internet.go, trojan.go, vmess.go, shadowsocks.go и т.д.).
+//
+// PrintRemovedFeatureError оставлено как было — это реальная ошибка
+// (фича РЕАЛЬНО удалена), её мы НЕ глушим. Пусть xray корректно сообщит
+// что фича недоступна.
 
-// PrintNonRemovalDeprecatedFeatureWarning prints a warning of the deprecated feature that won't be removed in the near future.
+// PrintNonRemovalDeprecatedFeatureWarning — no-op в MegaV.
 // Do not remove this function even there is no reference to it.
 func PrintNonRemovalDeprecatedFeatureWarning(sourceFeature string, targetFeature string) {
-	LogWarning(context.Background(), "The feature "+sourceFeature+" is deprecated, not recommended for using and might be removed. Please migrate to "+targetFeature+" as soon as possible.")
+	_ = sourceFeature
+	_ = targetFeature
 }
 
-// PrintDeprecatedFeatureWarning prints a warning for deprecated and going to be removed feature.
+// PrintDeprecatedFeatureWarning — no-op в MegaV.
 // Do not remove this function even there is no reference to it.
 func PrintDeprecatedFeatureWarning(feature string, migrateFeature string) {
-	if len(migrateFeature) > 0 {
-		LogWarning(context.Background(), "This feature "+feature+" is deprecated, will be removed soon and being migrated to "+migrateFeature+". Please update your config(s) according to release note and documentation before removal.")
-	} else {
-		LogWarning(context.Background(), "This feature "+feature+" is deprecated and will be removed soon. Please update your config(s) according to release note and documentation before removal.")
-	}
+	_ = feature
+	_ = migrateFeature
 }
 
 // PrintRemovedFeatureError prints an error message for removed feature then return an error. And after long enough time the message can also be removed, uses as an indicator.
 // Do not remove this function even there is no reference to it.
+// MegaV: НЕ ТРОГАЕМ — это реальная ошибка, не warning.
 func PrintRemovedFeatureError(feature string, migrateFeature string) error {
 	if len(migrateFeature) > 0 {
 		return New("The feature " + feature + " has been removed and migrated to " + migrateFeature + ". Please update your config(s) according to release note and documentation.")
