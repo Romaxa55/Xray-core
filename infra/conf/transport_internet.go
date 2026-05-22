@@ -1074,6 +1074,9 @@ type SocketConfig struct {
 	AddressPortStrategy   string                 `json:"addressPortStrategy"`
 	HappyEyeballsSettings *HappyEyeballsConfig   `json:"happyEyeballs"`
 	TrustedXForwardedFor  []string               `json:"trustedXForwardedFor"`
+	// MegaV: outbound-tag для retry при handshake-fail через dialerProxy.
+	// "direct" (= freedom outbound) → re-dial напрямую, replay'я первый Write.
+	DialerProxyFallbackTag string `json:"dialerProxyFallbackTag"`
 }
 
 // Build implements Buildable.
@@ -1194,6 +1197,7 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 		AddressPortStrategy:  addressPortStrategy,
 		HappyEyeballs:        happyEyeballs,
 		TrustedXForwardedFor: c.TrustedXForwardedFor,
+		DialerProxyFallbackTag: c.DialerProxyFallbackTag,
 	}, nil
 }
 

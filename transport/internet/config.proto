@@ -157,6 +157,13 @@ message SocketConfig {
   HappyEyeballsConfig happy_eyeballs = 22;
 
   repeated string trusted_x_forwarded_for = 23;
+
+  // MegaV addition (2026-05-22): outbound-tag для retry если dial через
+  // dialer_proxy fail'нулся на первом Read (handshake). Например, "direct" —
+  // тогда после fail chain попробуем dial напрямую (без proxy), replay'я
+  // буферизованный первый Write. Пустая строка = поведение как раньше
+  // (никакого retry, fail приходит в outbound handler как обычно).
+  string dialer_proxy_fallback_tag = 24;
 }
 
 message HappyEyeballsConfig {

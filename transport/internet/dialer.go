@@ -305,7 +305,28 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		if err != nil {
 			return nil, err
 		}
-		return redirect(ctx, dest, tag, h), nil
+		primary := redirect(ctx, dest, tag, h)
+
+		// MegaV addition (2026-05-22): fallback на handshake-fail.
+		// Если sockopt.DialerProxyFallbackTag непустой — оборачиваем
+		// primary connection в retry-wrapper. При fail первого Read
+		// (например WS-close 1006 от CF Workers когда Reality не пролезает
+		// через trojan-WS bs) wrapper переподключится через fallback-tag
+		// (например "direct") и replay'нёт первый Write.
+		if len(sockopt.DialerProxyFallbackTag) > 0 {
+			fbTag := sockopt.DialerProxyFallbackTag
+			fallback := func() (net.Conn, error) {
+				fbH := obm.GetHandler(fbTag)
+				if fbH == nil {
+					return nil, errors.New("dialerProxyFallback: outbound handler not found for tag ", fbTag).AtError()
+				}
+				errors.LogInfo(ctx, "dialerProxyFallback: re-dialing ", dest, " via outbound ", fbTag)
+				return redirect(ctx, dest, fbTag, fbH), nil
+			}
+			return wrapFallback(ctx, primary, fallback), nil
+		}
+
+		return primary, nil
 	}
 
 	return effectiveSystemDialer.Dial(ctx, src, dest, sockopt)
