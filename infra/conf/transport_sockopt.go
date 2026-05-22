@@ -63,6 +63,9 @@ type SocketConfig struct {
 	AddressPortStrategy   string                 `json:"addressPortStrategy"`
 	HappyEyeballsSettings *HappyEyeballsConfig   `json:"happyEyeballs"`
 	TrustedXForwardedFor  []string               `json:"trustedXForwardedFor"`
+	// MegaV: outbound-tag для retry при handshake-fail через dialerProxy.
+	// "direct" (= freedom outbound) → re-dial напрямую, replay'я первый Write.
+	DialerProxyFallbackTag string `json:"dialerProxyFallbackTag"`
 }
 
 // Build implements Buildable.
@@ -163,25 +166,26 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 	}
 
 	return &internet.SocketConfig{
-		Mark:                 c.Mark,
-		Tfo:                  tfo,
-		Tproxy:               tproxy,
-		DomainStrategy:       dStrategy,
-		AcceptProxyProtocol:  c.AcceptProxyProtocol,
-		DialerProxy:          c.DialerProxy,
-		TcpKeepAliveInterval: c.TCPKeepAliveInterval,
-		TcpKeepAliveIdle:     c.TCPKeepAliveIdle,
-		TcpCongestion:        c.TCPCongestion,
-		TcpWindowClamp:       c.TCPWindowClamp,
-		TcpMaxSeg:            c.TCPMaxSeg,
-		Penetrate:            c.Penetrate,
-		TcpUserTimeout:       c.TCPUserTimeout,
-		V6Only:               c.V6only,
-		Interface:            c.Interface,
-		TcpMptcp:             c.TcpMptcp,
-		CustomSockopt:        customSockopts,
-		AddressPortStrategy:  addressPortStrategy,
-		HappyEyeballs:        happyEyeballs,
-		TrustedXForwardedFor: c.TrustedXForwardedFor,
+		Mark:                   c.Mark,
+		Tfo:                    tfo,
+		Tproxy:                 tproxy,
+		DomainStrategy:         dStrategy,
+		AcceptProxyProtocol:    c.AcceptProxyProtocol,
+		DialerProxy:            c.DialerProxy,
+		TcpKeepAliveInterval:   c.TCPKeepAliveInterval,
+		TcpKeepAliveIdle:       c.TCPKeepAliveIdle,
+		TcpCongestion:          c.TCPCongestion,
+		TcpWindowClamp:         c.TCPWindowClamp,
+		TcpMaxSeg:              c.TCPMaxSeg,
+		Penetrate:              c.Penetrate,
+		TcpUserTimeout:         c.TCPUserTimeout,
+		V6Only:                 c.V6only,
+		Interface:              c.Interface,
+		TcpMptcp:               c.TcpMptcp,
+		CustomSockopt:          customSockopts,
+		AddressPortStrategy:    addressPortStrategy,
+		HappyEyeballs:          happyEyeballs,
+		TrustedXForwardedFor:   c.TrustedXForwardedFor,
+		DialerProxyFallbackTag: c.DialerProxyFallbackTag,
 	}, nil
 }
