@@ -307,6 +307,18 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		}
 		primary := redirect(ctx, dest, tag, h)
 
+		// MegaV addition (2026-05-22): route notification.
+		// `outbounds[len-1].Tag` — это config-тег outbound'а который сейчас
+		// dial'ит (например "server-391" exit). NB: ob.Name = тип протокола
+		// ("shadowsocks-2022", "trojan", "freedom"), а ob.Tag — config-тег
+		// который мы и хотим. Сообщаем что Tag dial'ит через `tag` (= resolved
+		// bs / balancer target). Dart рисует на карте линию exit→bs.
+		var dialerTag string
+		if len(outbounds) > 0 {
+			dialerTag = outbounds[len(outbounds)-1].Tag
+		}
+		notifyRoute(dialerTag, "via:"+tag)
+
 		// MegaV addition (2026-05-22): fallback на handshake-fail.
 		// Если sockopt.DialerProxyFallbackTag непустой — оборачиваем
 		// primary connection в retry-wrapper. При fail первого Read
@@ -315,12 +327,16 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		// (например "direct") и replay'нёт первый Write.
 		if len(sockopt.DialerProxyFallbackTag) > 0 {
 			fbTag := sockopt.DialerProxyFallbackTag
+			capturedDialer := dialerTag
 			fallback := func() (net.Conn, error) {
 				fbH := obm.GetHandler(fbTag)
 				if fbH == nil {
 					return nil, errors.New("dialerProxyFallback: outbound handler not found for tag ", fbTag).AtError()
 				}
 				errors.LogInfo(ctx, "dialerProxyFallback: re-dialing ", dest, " via outbound ", fbTag)
+				// Сообщаем что dialerTag свалился на fallback-тег.
+				// Dart нарисует прямую линию exit→user (минуя bs).
+				notifyRoute(capturedDialer, "fallback:"+fbTag)
 				return redirect(ctx, dest, fbTag, fbH), nil
 			}
 			return wrapFallback(ctx, primary, fallback), nil
@@ -328,6 +344,18 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 
 		return primary, nil
 	}
+
+	// MegaV addition (2026-05-22): direct dial (no dialerProxy)
+	// Регистрируем "direct" для outbound — exit идёт напрямую без chain.
+	// Берём tag из сессии — fallback на outboundName если tag пуст (legacy).
+	var directTag string
+	if len(outbounds) > 0 {
+		directTag = outbounds[len(outbounds)-1].Tag
+	}
+	if directTag == "" {
+		directTag = outboundName
+	}
+	notifyRoute(directTag, "direct")
 
 	return effectiveSystemDialer.Dial(ctx, src, dest, sockopt)
 }
