@@ -140,7 +140,28 @@ func (c *fallbackDialerConn) Read(b []byte) (int, error) {
 	c.mu.Unlock()
 
 	// Закрываем primary в фоне (не блокируем Read).
-	go oldConn.Close()
+	// MegaV 2026-05-22 (golang-pro audit): fire-and-forget с deadline.
+	// Если oldConn.Close() виснет (CF Workers не отвечает на FIN/RST),
+	// goroutine утечёт навсегда → growing baseline на каждый fallback.
+	// Добавляем 3-sec deadline и recover от panic в Close.
+	go func(c net.Conn) {
+		defer func() {
+			if r := recover(); r != nil {
+				// ignore — close уже мог быть вызван
+			}
+		}()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = c.Close()
+		}()
+		select {
+		case <-done:
+			// closed gracefully
+		case <-time.After(3 * time.Second):
+			// hung — abandon, GC eventually
+		}
+	}(oldConn)
 
 	// Теперь делаем Read через новый fb
 	return c.Conn.Read(b)
