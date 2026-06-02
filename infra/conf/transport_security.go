@@ -360,7 +360,11 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 	config.MasterKeyLog = c.MasterKeyLog
 
 	if c.AllowInsecure {
-		return nil, errors.PrintRemovedFeatureError(`"allowInsecure"`, `"pinnedPeerCertSha256"(pcs) and "verifyPeerCertByName"(vcn)`)
+		// MegaV fork: upstream xray-core rejects allowInsecure since 2026-06-01, which
+		// silently breaks every shipped client whose config still carries the flag
+		// (CF Workers fronts with mismatched certs). The fork keeps it as a warning.
+		errors.LogWarning(context.Background(), `"allowInsecure" is deprecated upstream; kept enabled in MegaV fork. Migrate to "pinnedPeerCertSha256"(pcs)/"verifyPeerCertByName"(vcn).`)
+		config.AllowInsecure = true
 	}
 	if c.PinnedPeerCertSha256 != "" {
 		for v := range strings.SplitSeq(c.PinnedPeerCertSha256, ",") {
