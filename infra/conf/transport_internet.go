@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -704,12 +703,13 @@ func (c *TLSConfig) Build() (proto.Message, error) {
 	config.MasterKeyLog = c.MasterKeyLog
 
 	if c.AllowInsecure {
-		if time.Now().After(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) {
-			return nil, errors.PrintRemovedFeatureError(`"allowInsecure"`, `"pinnedPeerCertSha256"`)
-		} else {
-			errors.LogWarning(context.Background(), `"allowInsecure" will be removed automatically after 2026-06-01, please use "pinnedPeerCertSha256"(pcs) and "verifyPeerCertByName"(vcn) instead, PLEASE CONTACT YOUR SERVICE PROVIDER (AIRPORT)`)
-			config.AllowInsecure = true
-		}
+		// MegaV fork: upstream xray-core hard-fails on allowInsecure after
+		// 2026-06-01, which silently breaks every shipped client whose config
+		// still carries the flag (CF Workers fronts with mismatched certs).
+		// We degrade to a warning instead of fatal so existing builds keep
+		// working until the generator migrates off allowInsecure.
+		errors.LogWarning(context.Background(), `"allowInsecure" is deprecated upstream; kept enabled in MegaV fork. Migrate to "pinnedPeerCertSha256"(pcs)/"verifyPeerCertByName"(vcn).`)
+		config.AllowInsecure = true
 	}
 	if c.PinnedPeerCertSha256 != "" {
 		for v := range strings.SplitSeq(c.PinnedPeerCertSha256, ",") {

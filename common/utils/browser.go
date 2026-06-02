@@ -22,12 +22,15 @@ var globalRng *rand.Rand = GetRandomizer()
 
 // The Chrome version generator will suffer from deviation of a normal distribution.
 func ChromeVersion() int {
-	// Start from Chrome 144, released on 2026.1.13.
-	var startVersion int = 144
-	var timeStart int64 = time.Date(2026, 1, 13, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	// MegaV 2026-06-02: re-anchored to keep the masqueraded fingerprint current.
+	// Chrome 149 was stable on 2026-06-02; upstream anchor (144 @ 2026-01-13) had
+	// drifted ~3 versions behind, making the UA look like an outdated browser to DPI.
+	// Anchor at today's top version with no startup offset so rng=0 == real latest.
+	var startVersion int = 149
+	var timeStart int64 = time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC).Unix() / 86400
 	var timeCurrent int64 = time.Now().Unix() / 86400
-	var timeDiff int = int((timeCurrent - timeStart - 35)) - int(math.Floor(math.Pow(globalRng.Float64(), 2) * 105))
-	return startVersion + (timeDiff / 35) // It's 31.15 currently.
+	var timeDiff int = int(timeCurrent-timeStart) - int(math.Floor(math.Pow(globalRng.Float64(), 2)*105))
+	return startVersion + (timeDiff / 35) // cadence ~35 days/major
 }
 
 var safariMinorMap [25]int = [25]int{0, 0, 0, 1, 1,
@@ -36,19 +39,22 @@ var safariMinorMap [25]int = [25]int{0, 0, 0, 1, 1,
 
 // The following version generators use deterministic generators, but with the distribution scaled by a curve.
 func CurlVersion() string {
-	// curl 8.0.0 was released on 20/03/2023.
+	// MegaV 2026-06-02: re-anchored. curl 8.20.0 was stable on 2026-04-29 (latest
+	// on 2026-06-02). Anchor minor 20 at today with no offset so rng=0 == 8.20.
 	var timeCurrent int64 = time.Now().Unix() / 86400
-	var timeStart int64 = time.Date(2023, 3, 20, 0, 0, 0, 0, time.UTC).Unix() / 86400
-	var timeDiff int = int((timeCurrent - timeStart - 60)) - int(math.Floor(math.Pow(globalRng.Float64(), 2) * 165))
-	var minorValue int = int(timeDiff / 57) // The release cadence is actually 56.67 days.
+	var timeStart int64 = time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	var timeDiff int = int(timeCurrent-timeStart) - int(math.Floor(math.Pow(globalRng.Float64(), 2)*165))
+	var minorValue int = 20 + int(timeDiff/57) // cadence ~56.67 days/minor
 	return "8." + strconv.Itoa(minorValue) + ".0"
 }
 func FirefoxVersion() int {
-	// Firefox 128 ESR was released on 09/07/2023.
+	// MegaV 2026-06-02: re-anchored. Firefox 151 was stable on 2026-06-01 (latest
+	// on 2026-06-02). Upstream anchor (128 @ 2024-07-29) drifted ~3 behind. Anchor
+	// at today's top version with no offset so rng=0 == real latest.
 	var timeCurrent int64 = time.Now().Unix() / 86400
-	var timeStart int64 = time.Date(2024, 7, 29, 0, 0, 0, 0, time.UTC).Unix() / 86400
-	var timeDiff = timeCurrent - timeStart - 25 - int64(math.Floor(math.Pow(globalRng.Float64(), 2) * 50))
-	return int(timeDiff / 30) + 128
+	var timeStart int64 = time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	var timeDiff = timeCurrent - timeStart - int64(math.Floor(math.Pow(globalRng.Float64(), 2)*50))
+	return int(timeDiff/30) + 151
 }
 func SafariVersion() string {
 	var anchoredTime time.Time = time.Now()

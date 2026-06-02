@@ -92,7 +92,10 @@ func (c *client) dial(ctx context.Context) error {
 		DisablePathMTUDiscovery:        quicParams.DisablePathMtuDiscovery || (runtime.GOOS != "linux" && runtime.GOOS != "windows" && runtime.GOOS != "darwin"),
 		EnableDatagrams:                true,
 		MaxDatagramFrameSize:           MaxDatagramFrameSize,
-		OmitMaxDatagramFrameSize:       time.Now().After(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)),
+		// MegaV fork: upstream flips this to true after 2026-09-01, silently
+		// changing the QUIC datagram frame behaviour for hysteria. Pin to the
+		// pre-deadline value so behaviour never changes under us on a date.
+		OmitMaxDatagramFrameSize:       false,
 		DisablePathManager:             true,
 	}
 	if quicParams.InitStreamReceiveWindow == 0 {
