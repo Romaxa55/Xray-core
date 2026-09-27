@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"math/big"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -27,11 +28,19 @@ var _ Interface = (*Conn)(nil)
 
 type Conn struct {
 	*tls.Conn
+	suppressCloseNotify atomic.Bool
 }
 
 const tlsCloseTimeout = 250 * time.Millisecond
 
+func (c *Conn) SuppressCloseNotify() {
+	c.suppressCloseNotify.Store(true)
+}
+
 func (c *Conn) Close() error {
+	if c.suppressCloseNotify.Load() {
+		return c.Conn.NetConn().Close()
+	}
 	timer := time.AfterFunc(tlsCloseTimeout, func() {
 		c.Conn.NetConn().Close()
 	})
@@ -72,11 +81,19 @@ func Server(c net.Conn, config *tls.Config) net.Conn {
 
 type UConn struct {
 	*utls.UConn
+	suppressCloseNotify atomic.Bool
 }
 
 var _ Interface = (*UConn)(nil)
 
+func (c *UConn) SuppressCloseNotify() {
+	c.suppressCloseNotify.Store(true)
+}
+
 func (c *UConn) Close() error {
+	if c.suppressCloseNotify.Load() {
+		return c.Conn.NetConn().Close()
+	}
 	timer := time.AfterFunc(tlsCloseTimeout, func() {
 		c.Conn.NetConn().Close()
 	})
