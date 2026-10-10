@@ -18,6 +18,7 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
+	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/finalmask"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
@@ -30,6 +31,8 @@ import (
 type client struct {
 	sync.Mutex
 
+	instance       *core.Instance
+	forced         bool
 	dest           net.Destination
 	config         *Config
 	tlsConfig      *go_tls.Config
@@ -66,11 +69,14 @@ func (c *client) close() {
 }
 
 func (c *client) dial(ctx context.Context) error {
-	status := c.status()
-	if status == StatusActive {
-		return nil
+	if c.forced {
+		return errors.New("client is closed")
 	}
-	if status == StatusInactive {
+
+	switch c.status() {
+	case StatusActive:
+		return nil
+	case StatusInactive:
 		c.close()
 	}
 
@@ -95,8 +101,8 @@ func (c *client) dial(ctx context.Context) error {
 		// MegaV fork: upstream flips this to true after 2026-09-01, silently
 		// changing the QUIC datagram frame behaviour for hysteria. Pin to the
 		// pre-deadline value so behaviour never changes under us on a date.
-		OmitMaxDatagramFrameSize:       false,
-		DisablePathManager:             true,
+		OmitMaxDatagramFrameSize: false,
+		DisablePathManager:       true,
 	}
 	if quicParams.InitStreamReceiveWindow == 0 {
 		quicConfig.InitialStreamReceiveWindow = 8388608
@@ -292,9 +298,12 @@ func (c *client) udp(ctx context.Context) (stat.Connection, error) {
 	return c.udpSM.udp()
 }
 
-func (c *client) clean() {
+func (c *client) clean(force bool) {
 	c.Lock()
-	if c.status() == StatusInactive {
+	if force {
+		c.forced = true
+	}
+	if status := c.status(); force && status != StatusNull || status == StatusInactive {
 		c.close()
 	}
 	c.Unlock()
@@ -313,11 +322,23 @@ type clientManager struct {
 func (m *clientManager) clean() {
 	ticker := time.NewTicker(idleCleanupInterval)
 	for range ticker.C {
+		var forced []dialerConf
+
 		m.RLock()
-		for _, c := range m.m {
-			c.clean()
+		for k, c := range m.m {
+			force := c.instance != nil && !c.instance.IsRunning()
+			c.clean(force)
+			if force {
+				forced = append(forced, k)
+			}
 		}
 		m.RUnlock()
+
+		for i := range forced {
+			m.Lock()
+			delete(m.m, forced[i])
+			m.Unlock()
+		}
 	}
 }
 
@@ -340,15 +361,18 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		go manager.clean()
 	})
 
+	dialerConfKey := dialerConf{dest, streamSettings}
+
 	manager.RLock()
-	c := manager.m[dialerConf{dest, streamSettings}]
+	c := manager.m[dialerConfKey]
 	manager.RUnlock()
 
 	if c == nil {
 		manager.Lock()
-		c = manager.m[dialerConf{dest, streamSettings}]
+		c = manager.m[dialerConfKey]
 		if c == nil {
 			c = &client{
+				instance:       core.FromContext(ctx),
 				dest:           dest,
 				config:         streamSettings.ProtocolSettings.(*Config),
 				tlsConfig:      tlsConfig.GetTLSConfig(),
@@ -356,7 +380,7 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				udpmaskManager: streamSettings.UdpmaskManager,
 				quicParams:     streamSettings.QuicParams,
 			}
-			manager.m[dialerConf{dest, streamSettings}] = c
+			manager.m[dialerConfKey] = c
 		}
 		manager.Unlock()
 	}
