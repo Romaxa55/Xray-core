@@ -23,6 +23,7 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
+	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/common/uuid"
 	"github.com/xtls/xray-core/transport/internet"
@@ -45,7 +46,68 @@ type dialerConf struct {
 var (
 	globalDialerMap    map[dialerConf]*XmuxManager
 	globalDialerAccess sync.Mutex
+	// dialerJanitorRunning is guarded by globalDialerAccess.
+	dialerJanitorRunning bool
 )
+
+// The key of globalDialerMap holds the stream settings of one Xray instance, so
+// a closed instance leaves its managers behind for good, and an XHTTP/3 client
+// keeps its QUIC connection alive with keepalives for the life of the process.
+// The janitor closes clients with no running requests for dialerIdleTimeout
+// (env xray.xhttp.idle.timeout, seconds) and drops the managers left empty; it
+// stops when the map is empty. An unset, zero or negative value means the
+// default net.ConnIdleTimeout; the janitor cannot be turned off.
+// Read on first use (the first janitor start or packet-up POST), not at package
+// init: mobile wrappers set the environment after Go initializes the packages.
+var dialerIdleTimeout = sync.OnceValue(func() time.Duration {
+	if s := platform.NewEnvFlag(platform.XHTTPIdleTimeout).GetValueAsInt(0); s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return net.ConnIdleTimeout
+})
+
+// postPacketTimeout bounds one packet-up POST. The upload holds its client until
+// the POST returns, so a server that keeps QUIC/h2 alive but never answers would
+// otherwise keep the client and its connection open for good. A variable so a
+// test can shorten it.
+var postPacketTimeout = dialerIdleTimeout
+
+func dialerSweepInterval() time.Duration {
+	return min(max(dialerIdleTimeout()/5, 5*time.Second), time.Minute)
+}
+
+func dialerJanitor() {
+	ticker := time.NewTicker(dialerSweepInterval())
+	defer ticker.Stop()
+	for range ticker.C {
+		if !sweepIdleDialers(monoNow()) {
+			return
+		}
+	}
+}
+
+// sweepIdleDialers reports whether the janitor should keep running.
+func sweepIdleDialers(now time.Duration) bool {
+	var removed []*XmuxClient
+
+	globalDialerAccess.Lock()
+	for key, xmuxManager := range globalDialerMap {
+		var empty bool
+		if removed, empty = xmuxManager.removeIdle(now, dialerIdleTimeout(), removed); empty {
+			delete(globalDialerMap, key)
+		}
+	}
+	keepRunning := len(globalDialerMap) > 0
+	if !keepRunning {
+		dialerJanitorRunning = false
+	}
+	globalDialerAccess.Unlock()
+
+	for _, xmuxClient := range removed {
+		xmuxClient.maybeClose()
+	}
+	return keepRunning
+}
 
 func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig) (DialerClient, *XmuxClient) {
 	realityConfig := reality.ConfigFromStreamSettings(streamSettings)
@@ -59,6 +121,10 @@ func getHTTPClient(ctx context.Context, dest net.Destination, streamSettings *in
 
 	if globalDialerMap == nil {
 		globalDialerMap = make(map[dialerConf]*XmuxManager)
+	}
+	if !dialerJanitorRunning {
+		dialerJanitorRunning = true
+		go dialerJanitor()
 	}
 
 	key := dialerConf{dest, streamSettings}
@@ -183,6 +249,8 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 		if quicParams.KeepAlivePeriod == 0 {
 			if keepAlivePeriod == 0 {
 				quicConfig.KeepAlivePeriod = net.QuicgoH3KeepAlivePeriod
+			} else if keepAlivePeriod > 0 {
+				quicConfig.KeepAlivePeriod = keepAlivePeriod
 			}
 		}
 		if quicParams.MaxIncomingStreams == 0 {
@@ -262,6 +330,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 				if err != nil {
 					return nil, err
 				}
+				context.AfterFunc(conn.Context(), func() { pktConn.Close() })
 
 				switch quicParams.Congestion {
 				case "reno":
@@ -429,10 +498,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 	}
 
 	if xmuxClient != nil {
-		xmuxClient.OpenUsage.Add(1)
+		xmuxClient.AddRunning()
 	}
 	if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-		xmuxClient2.OpenUsage.Add(1)
+		xmuxClient2.AddRunning()
 	}
 	var closed atomic.Int32
 
@@ -444,10 +513,10 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 				return
 			}
 			if xmuxClient != nil {
-				xmuxClient.OpenUsage.Add(-1)
+				xmuxClient.DoneRunning()
 			}
 			if xmuxClient2 != nil && xmuxClient2 != xmuxClient {
-				xmuxClient2.OpenUsage.Add(-1)
+				xmuxClient2.DoneRunning()
 			}
 		},
 	}
@@ -506,6 +575,16 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		var seq int64
 		var lastWrite time.Time
 
+		dynamicHTTPClient := httpClient
+		dynamicXmuxClient := xmuxClient
+		// the conn holds xmuxClient through onClose; a client the upload
+		// switched to is held here, so neither XMUX nor the janitor closes it
+		// while the upload still posts through it
+		defer func() {
+			if dynamicXmuxClient != nil && dynamicXmuxClient != xmuxClient {
+				dynamicXmuxClient.release()
+			}
+		}()
 		for {
 			// by offloading the uploads into a buffered pipe, multiple conn.Write
 			// calls get automatically batched together into larger POST requests.
@@ -540,13 +619,28 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 				lastWrite = time.Now()
 
-				if xmuxClient != nil && (xmuxClient.LeftRequests.Add(-1) <= 0 ||
-					(xmuxClient.UnreusableAt != time.Time{} && lastWrite.After(xmuxClient.UnreusableAt))) {
-					httpClient, xmuxClient = getHTTPClient(ctx, dest, streamSettings)
+				if dynamicXmuxClient != nil && (dynamicXmuxClient.LeftRequests.Add(-1) <= 0 ||
+					(dynamicXmuxClient.UnreusableAt != time.Time{} && lastWrite.After(dynamicXmuxClient.UnreusableAt))) {
+					prevXmuxClient := dynamicXmuxClient
+					dynamicHTTPClient, dynamicXmuxClient = getHTTPClient(ctx, dest, streamSettings)
+					if dynamicXmuxClient != prevXmuxClient {
+						if dynamicXmuxClient != nil && dynamicXmuxClient != xmuxClient {
+							dynamicXmuxClient.hold()
+						}
+						if prevXmuxClient != xmuxClient {
+							prevXmuxClient.release()
+						}
+					}
 				}
 
-				go func() {
-					err := httpClient.PostPacket(
+				// a rotation may retire this client while the POST still
+				// waits for its response; hold it until the POST returns
+				postXmuxClient := dynamicXmuxClient
+				if postXmuxClient != nil {
+					postXmuxClient.hold()
+				}
+				go func(hClient DialerClient) {
+					err := hClient.PostPacket(
 						ctx,
 						requestURL.String(),
 						sessionId,
@@ -554,14 +648,17 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 						chunk,
 					)
 					wroteRequest.Close()
+					if postXmuxClient != nil {
+						postXmuxClient.release()
+					}
 					if err != nil {
 						errors.LogInfoInner(ctx, err, "failed to send upload")
 						uploadPipeReader.Interrupt()
 						doSplit.Store(false)
 					}
-				}()
+				}(dynamicHTTPClient)
 
-				if _, ok := httpClient.(*DefaultDialerClient); ok {
+				if _, ok := dynamicHTTPClient.(*DefaultDialerClient); ok {
 					<-wroteRequest.Wait()
 				}
 			}
@@ -596,11 +693,12 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 
 	var writed int
 	for _, buff := range buffer.MultiBuffer {
+		n := int(buff.Len())
 		err := w.WriteMultiBuffer(buf.MultiBuffer{buff})
 		if err != nil {
 			return writed, err
 		}
-		writed += int(buff.Len())
+		writed += n
 	}
 	return writed, nil
 }
