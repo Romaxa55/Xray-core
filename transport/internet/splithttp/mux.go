@@ -23,20 +23,54 @@ type XmuxClient struct {
 	LeftRequests atomic.Int32
 	UnreusableAt time.Time
 	NotUsed      atomic.Bool
+	lastUsed     atomic.Int64 // monoNow() at the last use
+	// holds keeps the client open for a user that Running does not count (an
+	// upload rotated onto it, a request in flight) without affecting the
+	// choice of a client by maxConcurrency.
+	holds atomic.Int32
+}
+
+var monoBase = time.Now()
+
+// monoNow reads the monotonic clock, so a wall clock change does not make idle
+// clients look fresh or stale.
+func monoNow() time.Duration {
+	return time.Since(monoBase)
+}
+
+func (c *XmuxClient) touch() {
+	c.lastUsed.Store(int64(monoNow()))
 }
 
 func (c *XmuxClient) AddRunning() {
 	c.Running.Add(1)
+	c.touch()
 }
 
 func (c *XmuxClient) DoneRunning() {
+	c.touch()
 	c.Running.Add(-1)
 	c.maybeClose()
 }
 
-// close the XmuxConn if it is not used and has no running requests
+func (c *XmuxClient) hold() {
+	c.holds.Add(1)
+	c.touch()
+}
+
+func (c *XmuxClient) release() {
+	c.touch()
+	c.holds.Add(-1)
+	c.maybeClose()
+}
+
+func (c *XmuxClient) busy() bool {
+	return c.Running.Load() > 0 || c.holds.Load() > 0
+}
+
+// close the XmuxConn if it is not used and has no running requests or holds
 func (c *XmuxClient) maybeClose() {
-	if c.NotUsed.Load() && c.Running.Load() <= 0 {
+	if c.NotUsed.Load() && !c.busy() {
 		common.Close(c.XmuxConn)
 	}
 }
@@ -74,8 +108,31 @@ func (m *XmuxManager) newXmuxClient() *XmuxClient {
 	if x := m.xmuxConfig.GetNormalizedHMaxReusableSecs().rand(); x > 0 {
 		xmuxClient.UnreusableAt = time.Now().Add(time.Duration(x) * time.Second)
 	}
+	xmuxClient.touch()
 	m.xmuxClients = append(m.xmuxClients, xmuxClient)
 	return xmuxClient
+}
+
+// removeIdle takes out the clients that are closed or have had no running
+// requests for longer than idle (now and idle on the monoNow clock), marks them
+// unused and appends them to removed; the caller closes them with maybeClose
+// after it releases the lock that guards GetXmuxClient, which it holds here,
+// because closing a QUIC connection can block. It reports whether the manager
+// has no clients left.
+func (m *XmuxManager) removeIdle(now, idle time.Duration, removed []*XmuxClient) ([]*XmuxClient, bool) {
+	kept := m.xmuxClients[:0]
+	for _, xmuxClient := range m.xmuxClients {
+		if xmuxClient.XmuxConn.IsClosed() ||
+			(!xmuxClient.busy() && now-time.Duration(xmuxClient.lastUsed.Load()) > idle) {
+			xmuxClient.NotUsed.Store(true)
+			removed = append(removed, xmuxClient)
+			continue
+		}
+		kept = append(kept, xmuxClient)
+	}
+	clear(m.xmuxClients[len(kept):])
+	m.xmuxClients = kept
+	return removed, len(kept) == 0
 }
 
 func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when locking
@@ -87,6 +144,7 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 			(xmuxClient.UnreusableAt != time.Time{} && time.Now().After(xmuxClient.UnreusableAt)) {
 			errors.LogDebug(ctx, "XMUX: removing xmuxClient, IsClosed() = ", xmuxClient.XmuxConn.IsClosed(),
 				", Running = ", xmuxClient.Running.Load(),
+				", holds = ", xmuxClient.holds.Load(),
 				", leftUsage = ", xmuxClient.leftUsage,
 				", LeftRequests = ", xmuxClient.LeftRequests.Load(),
 				", UnreusableAt = ", xmuxClient.UnreusableAt)
@@ -129,5 +187,6 @@ func (m *XmuxManager) GetXmuxClient(ctx context.Context) *XmuxClient { // when l
 	if xmuxClient.leftUsage > 0 {
 		xmuxClient.leftUsage -= 1
 	}
+	xmuxClient.touch()
 	return xmuxClient
 }

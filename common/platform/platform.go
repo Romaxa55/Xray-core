@@ -23,6 +23,7 @@ const (
 	BrowserDialerAddress = "xray.browser.dialer"
 	XUDPLog              = "xray.xudp.show"
 	XUDPBaseKey          = "xray.xudp.basekey"
+	XHTTPIdleTimeout     = "xray.xhttp.idle.timeout"
 
 	TunFdKey = "xray.tun.fd"
 )
