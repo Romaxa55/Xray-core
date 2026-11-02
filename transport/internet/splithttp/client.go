@@ -100,7 +100,9 @@ func (c *DefaultDialerClient) OpenStream(ctx context.Context, url string, sessio
 
 func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessionId string, seqStr string, payload buf.MultiBuffer) error {
 	method := c.transportConfig.GetNormalizedUplinkHTTPMethod()
-	req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), method, url, nil)
+	reqCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postPacketTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, method, url, nil)
 	if err != nil {
 		return err
 	}
