@@ -80,6 +80,13 @@ func (c *connection) getReader() (io.Reader, error) {
 // Write implements io.Writer.
 func (c *connection) Write(b []byte) (int, error) {
 	if err := c.conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
+		// Once a close frame has gone out — the reply to the peer's close or
+		// our own — the stream is over, so report io.EOF as Read does for a
+		// normal close. An error here made the outbound interrupt the link and
+		// drop the data the reader had not taken yet.
+		if err == websocket.ErrCloseSent {
+			return 0, io.EOF
+		}
 		return 0, err
 	}
 	return len(b), nil
