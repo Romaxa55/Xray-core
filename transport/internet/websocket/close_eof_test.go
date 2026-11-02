@@ -55,3 +55,36 @@ func TestNormalCloseIsEOF(t *testing.T) {
 		t.Fatalf("response: %q", got)
 	}
 }
+
+// After the server's normal close the client has replied with its own close
+// frame, so a write fails: with io.EOF, the end of the stream, never an error
+// ("websocket: close sent") that interrupts the link as above.
+func TestWriteAfterNormalCloseIsEOF(t *testing.T) {
+	listenPort := tcp.PickPort()
+	listen, err := ListenWS(context.Background(), net.LocalHostIP, listenPort, &internet.MemoryStreamConfig{
+		ProtocolName:     "websocket",
+		ProtocolSettings: &Config{Path: "ws"},
+	}, func(conn stat.Connection) {
+		go func(c stat.Connection) {
+			defer c.Close()
+			common.Must2(c.Write([]byte("Response")))
+		}(conn)
+	})
+	common.Must(err)
+	defer listen.Close()
+
+	conn, err := Dial(context.Background(), net.TCPDestination(net.DomainAddress("localhost"), listenPort), &internet.MemoryStreamConfig{
+		ProtocolName:     "websocket",
+		ProtocolSettings: &Config{Path: "ws"},
+	})
+	common.Must(err)
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(conn); err != nil {
+		t.Fatalf("read after the server's normal close: %v", err)
+	}
+	if _, err := conn.Write([]byte("More")); err != io.EOF {
+		t.Fatalf("write after the close: %v, want io.EOF", err)
+	}
+}
