@@ -31,6 +31,10 @@ func startedInstance(t *testing.T) *core.Instance {
 // returns; the tunnel of a running instance is left alone.
 func TestDialerJanitorClosesClientsOfStoppedInstances(t *testing.T) {
 	isolateDialerMap(t)
+	// The test sweeps by hand; a real janitor started by Dial would outlive it.
+	globalDialerAccess.Lock()
+	dialerJanitorRunning = true
+	globalDialerAccess.Unlock()
 
 	port := tcp.PickPort()
 	serverSettings := &internet.MemoryStreamConfig{ProtocolName: protocolName, ProtocolSettings: &Config{ServiceName: "silent"}}
@@ -82,6 +86,7 @@ func TestDialerJanitorClosesClientsOfStoppedInstances(t *testing.T) {
 		return tunnel{conn, client, read}
 	}
 	a, b := open(running), open(stopped)
+	defer a.client.Close()
 	defer a.conn.Close()
 	defer b.conn.Close()
 
