@@ -24,6 +24,7 @@ const (
 	XUDPLog              = "xray.xudp.show"
 	XUDPBaseKey          = "xray.xudp.basekey"
 	XHTTPIdleTimeout     = "xray.xhttp.idle.timeout"
+	GRPCIdleTimeout      = "xray.grpc.idle.timeout"
 
 	TunFdKey = "xray.tun.fd"
 )
