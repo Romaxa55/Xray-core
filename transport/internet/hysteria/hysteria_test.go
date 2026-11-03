@@ -82,45 +82,6 @@ func TestDatagram(t *testing.T) {
 
 	addr, recv, cancel := run()
 
-	t.Run("With ChromeParrot", func(t *testing.T) {
-		tlsConf := &tls.Config{
-			InsecureSkipVerify: true,
-		}
-
-		quicConf := &quic.Config{
-			InitialStreamReceiveWindow:     8388608,
-			MaxStreamReceiveWindow:         8388608,
-			InitialConnectionReceiveWindow: 8388608 * 5 / 2,
-			MaxConnectionReceiveWindow:     8388608 * 5 / 2,
-			MaxIdleTimeout:                 30 * time.Second,
-			KeepAlivePeriod:                10 * time.Second,
-			DisablePathMTUDiscovery:        runtime.GOOS != "linux" && runtime.GOOS != "windows" && runtime.GOOS != "darwin",
-			ChromeParrot:                   true,
-			EnableDatagrams:                true,
-			MaxDatagramFrameSize:           MaxDatagramFrameSize,
-			OmitMaxDatagramFrameSize:       true,
-			DisablePathManager:             true,
-		}
-
-		pktConn := common.Must2(net.ListenPacket("udp", "127.0.0.1:0"))
-		tr := &quic.Transport{Conn: pktConn, ConnectionIDGenerator: quic.ZeroLengthConnectionIDGenerator{}}
-		conn := common.Must2(tr.DialEarly(context.Background(), addr, tlsConf, quicConf))
-
-		defer pktConn.Close()
-		defer tr.Close()
-		defer conn.CloseWithError(0, "")
-
-		var buf [1500]byte
-		err := conn.SendDatagram(buf[:])
-		var qErr *quic.DatagramTooLargeError
-		if !errors.As(err, &qErr) || qErr.MaxDatagramPayloadSize != 1197 {
-			t.Error(err)
-		}
-		if server := <-recv; server != 1243 {
-			t.Error(server)
-		}
-	})
-
 	t.Run("Without ChromeParrot", func(t *testing.T) {
 		tlsConf := &tls.Config{
 			InsecureSkipVerify: true,
@@ -135,7 +96,6 @@ func TestDatagram(t *testing.T) {
 			MaxIdleTimeout:                 30 * time.Second,
 			KeepAlivePeriod:                10 * time.Second,
 			DisablePathMTUDiscovery:        runtime.GOOS != "linux" && runtime.GOOS != "windows" && runtime.GOOS != "darwin",
-			ChromeParrot:                   false,
 			EnableDatagrams:                true,
 			MaxDatagramFrameSize:           MaxDatagramFrameSize,
 			OmitMaxDatagramFrameSize:       true,
