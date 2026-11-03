@@ -16,6 +16,7 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal/done"
+	"golang.org/x/net/http2"
 )
 
 // interface to abstract between use of browser dialer, vs net/http
@@ -180,11 +181,19 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	return nil
 }
 
-// HTTP/1.1 and HTTP/2 will close itself, we only handle HTTP/3 here
+// Close closes the client's connections that carry no requests. XMUX calls it
+// only for a client that is no longer picked and has no running requests or
+// holds, so for h2 and HTTP/1.1 that is every connection; without it an h2
+// connection the janitor dropped stays open with its read loop until the
+// transport's IdleConnTimeout.
 func (c *DefaultDialerClient) Close() error {
-	transport := c.client.Transport
-	if h3Transport, ok := transport.(*http3.Transport); ok {
-		h3Transport.Close()
+	switch transport := c.client.Transport.(type) {
+	case *http3.Transport:
+		transport.Close()
+	case *http2.Transport:
+		transport.CloseIdleConnections()
+	case *http.Transport:
+		transport.CloseIdleConnections()
 	}
 	return nil
 }
