@@ -13,6 +13,7 @@ import (
 	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/utils"
+	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/grpc/encoding"
 	"github.com/xtls/xray-core/transport/internet/reality"
@@ -50,6 +51,9 @@ type grpcClient struct {
 	// Guarded by globalDialerAccess.
 	active   int           // tunnels open on this ClientConn
 	lastUsed time.Duration // monoNow() when a tunnel last opened or closed
+	// instance is the Xray instance whose stream settings are in the key; nil
+	// when the dial context carries none.
+	instance *core.Instance
 }
 
 var (
@@ -73,6 +77,12 @@ var (
 // packages. It applies with idle_timeout/permit_without_stream as well: a
 // long-lived instance pays one more handshake after dialerIdleTimeout with no
 // tunnels, while an instance closed by its owner would otherwise never let go.
+//
+// The ClientConn of a stopped instance is closed even with tunnels open: a
+// tunnel whose proxy blocks reading the first response (a VLESS encryption
+// handshake to a server that accepted the stream and stays silent) never
+// reaches Close, so the ClientConn would keep it and the h2 connection forever.
+// Closing the ClientConn cancels its streams and the blocked read returns.
 var dialerIdleTimeout = sync.OnceValue(func() time.Duration {
 	if s := platform.NewEnvFlag(platform.GRPCIdleTimeout).GetValueAsInt(0); s > 0 {
 		return time.Duration(s) * time.Second
@@ -100,14 +110,41 @@ func dialerJanitor() {
 	}
 }
 
+// stoppedInstanceClients returns the clients whose Xray instance is stopped.
+// IsRunning takes the instance's statusLock, and Instance.Close holds it while
+// closing handlers whose tunnels take globalDialerAccess on release, so it is
+// called without globalDialerAccess held.
+func stoppedInstanceClients() map[*grpcClient]bool {
+	globalDialerAccess.Lock()
+	clients := make([]*grpcClient, 0, len(globalDialerMap))
+	for _, client := range globalDialerMap {
+		if client.instance != nil {
+			clients = append(clients, client)
+		}
+	}
+	globalDialerAccess.Unlock()
+
+	var stopped map[*grpcClient]bool
+	for _, client := range clients {
+		if !client.instance.IsRunning() {
+			if stopped == nil {
+				stopped = make(map[*grpcClient]bool)
+			}
+			stopped[client] = true
+		}
+	}
+	return stopped
+}
+
 // sweepIdleDialers reports whether the janitor should keep running.
 func sweepIdleDialers(now time.Duration) bool {
+	stopped := stoppedInstanceClients()
 	var removed []*grpc.ClientConn
 
 	globalDialerAccess.Lock()
 	idle := dialerIdleTimeout()
 	for key, client := range globalDialerMap {
-		if client.GetState() == connectivity.Shutdown || (client.active <= 0 && now-client.lastUsed > idle) {
+		if stopped[client] || client.GetState() == connectivity.Shutdown || (client.active <= 0 && now-client.lastUsed > idle) {
 			delete(globalDialerMap, key)
 			removed = append(removed, client.ClientConn)
 		}
@@ -305,7 +342,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 	if err != nil {
 		return nil, err
 	}
-	client := &grpcClient{ClientConn: conn}
+	client := &grpcClient{ClientConn: conn, instance: core.FromContext(ctx)}
 	client.acquire()
 	globalDialerMap[dialerConf{dest, streamSettings}] = client
 	if !dialerJanitorRunning {
