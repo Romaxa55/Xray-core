@@ -181,18 +181,16 @@ func (c *DefaultDialerClient) PostPacket(ctx context.Context, url string, sessio
 	return nil
 }
 
-// Close closes the client's connections that carry no requests. XMUX calls it
-// only for a client that is no longer picked and has no running requests or
-// holds, so for h2 and HTTP/1.1 that is every connection; without it an h2
-// connection the janitor dropped stays open with its read loop until the
-// transport's IdleConnTimeout.
+// Close closes the client's h2 connections that carry no requests. XMUX calls
+// it only for a client that is no longer picked and has no running requests or
+// holds, so that is every connection; without it an h2 connection the janitor
+// dropped stays open with its read loop until the transport's IdleConnTimeout.
+// HTTP/1.1 runs with keep-alives off and keeps no idle connections.
 func (c *DefaultDialerClient) Close() error {
 	switch transport := c.client.Transport.(type) {
 	case *http3.Transport:
 		transport.Close()
 	case *http2.Transport:
-		transport.CloseIdleConnections()
-	case *http.Transport:
 		transport.CloseIdleConnections()
 	}
 	return nil
