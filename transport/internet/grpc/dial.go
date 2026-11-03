@@ -52,7 +52,8 @@ type grpcClient struct {
 	active   int           // tunnels open on this ClientConn
 	lastUsed time.Duration // monoNow() when a tunnel last opened or closed
 	// instance is the Xray instance whose stream settings are in the key; nil
-	// when the dial context carries none.
+	// when the dial context carries none. Set once when the client is created
+	// and read without globalDialerAccess.
 	instance *core.Instance
 }
 
@@ -83,6 +84,8 @@ var (
 // handshake to a server that accepted the stream and stays silent) never
 // reaches Close, so the ClientConn would keep it and the h2 connection forever.
 // Closing the ClientConn cancels its streams and the blocked read returns.
+// Mux and XUDP tunnels dial with a context that carries no instance
+// (common/mux/client.go), so for them only the idle rule applies.
 var dialerIdleTimeout = sync.OnceValue(func() time.Duration {
 	if s := platform.NewEnvFlag(platform.GRPCIdleTimeout).GetValueAsInt(0); s > 0 {
 		return time.Duration(s) * time.Second
@@ -113,7 +116,9 @@ func dialerJanitor() {
 // stoppedInstanceClients returns the clients whose Xray instance is stopped.
 // IsRunning takes the instance's statusLock, and Instance.Close holds it while
 // closing handlers whose tunnels take globalDialerAccess on release, so it is
-// called without globalDialerAccess held.
+// called without globalDialerAccess held. The janitor waits for every
+// instance's Start and Close, as upstream's Hysteria cleanup does: a goroutine
+// dump with dialerJanitor blocked in IsRunning means one of them never returned.
 func stoppedInstanceClients() map[*grpcClient]bool {
 	globalDialerAccess.Lock()
 	clients := make([]*grpcClient, 0, len(globalDialerMap))
