@@ -98,7 +98,15 @@ func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
 			u.bufPool.Put(buf)
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
+				// A past deadline makes every read time out at once. Once the
+				// reader is gone the queue fills up, and a plain send would block
+				// forever, after Close too: watch closeChan, as upstream does
+				// since the udphop finalmask rewrite (#6327).
+				select {
+				case u.recvQueue <- &udpPacket{nil, 0, nil, netErr}:
+				case <-u.closeChan:
+					return
+				}
 				continue
 			}
 			return
