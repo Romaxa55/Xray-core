@@ -36,6 +36,29 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 func init() {
 	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
+	internet.RegisterStreamReleaser(releaseClients)
+}
+
+// releaseClients closes the clients dialed with streamSettings and forgets them. A
+// client's key holds its outbound's own stream config, which no later outbound shares:
+// without this, every client of a closed outbound stays for the life of the process,
+// connected or reconnecting to its server with backoff.
+func releaseClients(streamSettings *internet.MemoryStreamConfig) {
+	globalDialerAccess.Lock()
+	var clients []*grpc.ClientConn
+	for conf, client := range globalDialerMap {
+		if conf.MemoryStreamConfig != streamSettings {
+			continue
+		}
+		delete(globalDialerMap, conf)
+		if client != nil {
+			clients = append(clients, client)
+		}
+	}
+	globalDialerAccess.Unlock()
+	for _, client := range clients {
+		client.Close()
+	}
 }
 
 type dialerConf struct {
