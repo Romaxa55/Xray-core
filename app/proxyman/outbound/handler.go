@@ -6,6 +6,7 @@ import (
 	goerrors "errors"
 	"io"
 	"math/big"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/common/dice"
 
@@ -65,6 +66,10 @@ type Handler struct {
 	udp443          string
 	uplinkCounter   stats.Counter
 	downlinkCounter stats.Counter
+	// closed is set first by Close: a closed outbound dials no more, so nothing a
+	// transport keeps for its stream settings comes back after ReleaseStreamConfig
+	// (an observatory's probes, spread over its cycle, outlive the core's close).
+	closed atomic.Bool
 }
 
 // NewHandler creates a new Handler based on the given configuration.
@@ -266,6 +271,9 @@ func (h *Handler) DestIpAddress() net.IP {
 
 // Dial implements internet.Dialer.
 func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connection, error) {
+	if h.closed.Load() {
+		return nil, errors.New("outbound ", h.tag, " is closed")
+	}
 	if h.senderSettings != nil && h.senderSettings.Via != nil {
 		outbounds := session.OutboundsFromContext(ctx)
 		ob := outbounds[len(outbounds)-1]
@@ -273,6 +281,14 @@ func (h *Handler) Dial(ctx context.Context, dest net.Destination) (stat.Connecti
 	}
 
 	conn, err := internet.Dial(ctx, dest, h.streamSettings)
+	if h.closed.Load() {
+		// Closed while it dialed: what the dial made for this outbound goes too.
+		if conn != nil {
+			conn.Close()
+		}
+		internet.ReleaseStreamConfig(h.streamSettings)
+		return nil, errors.New("outbound ", h.tag, " is closed")
+	}
 	conn = h.getStatCouterConnection(conn)
 	return conn, err
 }
@@ -329,8 +345,10 @@ func (h *Handler) Start() error {
 
 // Close implements common.Closable.
 func (h *Handler) Close() error {
+	h.closed.Store(true)
 	common.Close(h.mux)
 	common.Close(h.proxy)
+	internet.ReleaseStreamConfig(h.streamSettings)
 	return nil
 }
 
