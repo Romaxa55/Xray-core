@@ -213,20 +213,30 @@ func TestClosedOutboundReleasesItsStreamAndDialsNoMore(t *testing.T) {
 	} else {
 		conn.Close()
 	}
+	if accepted, err := listener.Accept(); err != nil {
+		t.Fatal(err)
+	} else {
+		accepted.Close()
+	}
 
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	mu.Lock()
-	n := len(released)
+	got := append([]*internet.MemoryStreamConfig(nil), released...)
 	mu.Unlock()
-	if n != 1 || released[0] == nil {
-		t.Fatalf("released on close: %v", released)
+	if len(got) != 1 || got[0] == nil {
+		t.Fatalf("released on close: %v", got)
 	}
 	conn, err := h.(*Handler).Dial(ctx, dest)
 	if err == nil {
 		conn.Close()
 		t.Fatal("a closed outbound dialed")
+	}
+	listener.(*gonet.TCPListener).SetDeadline(time.Now().Add(200 * time.Millisecond))
+	if accepted, err := listener.Accept(); err == nil {
+		accepted.Close()
+		t.Fatal("a closed outbound reached the server before it refused")
 	}
 }

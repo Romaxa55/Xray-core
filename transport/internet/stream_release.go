@@ -23,8 +23,9 @@ func ReleaseStreamConfig(config *MemoryStreamConfig) {
 		return
 	}
 	streamReleasersAccess.RLock()
-	defer streamReleasersAccess.RUnlock()
-	for _, release := range streamReleasers {
+	releasers := streamReleasers[:len(streamReleasers):len(streamReleasers)]
+	streamReleasersAccess.RUnlock()
+	for _, release := range releasers {
 		release(config)
 	}
 }
