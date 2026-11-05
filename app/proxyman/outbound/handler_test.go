@@ -3,6 +3,7 @@ package outbound_test
 import (
 	"context"
 	"fmt"
+	gonet "net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,7 +19,9 @@ import (
 	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/proxy/freedom"
+	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
+	_ "github.com/xtls/xray-core/transport/internet/tcp"
 )
 
 func TestInterfaces(t *testing.T) {
@@ -173,4 +176,67 @@ func TestTagsCache(t *testing.T) {
 	wg_add_rm.Wait()
 	stop_get = true
 	wg_get.Wait()
+}
+
+// A closed outbound frees what the transports keep for its stream settings, and dials no
+// more: an observatory's probe that fires after the core closed must not dial a client
+// back into a transport's cache.
+func TestClosedOutboundReleasesItsStreamAndDialsNoMore(t *testing.T) {
+	var mu sync.Mutex
+	var released []*internet.MemoryStreamConfig
+	internet.RegisterStreamReleaser(func(c *internet.MemoryStreamConfig) {
+		mu.Lock()
+		defer mu.Unlock()
+		released = append(released, c)
+	})
+	v, _ := core.New(&core.Config{})
+	v.AddFeature((outbound.Manager)(new(Manager)))
+	ctx := context.WithValue(context.Background(), xrayKey, v)
+	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
+	h, err := NewHandler(ctx, &core.OutboundHandlerConfig{
+		Tag:            "closing",
+		SenderSettings: serial.ToTypedMessage(&proxyman.SenderConfig{}),
+		ProxySettings:  serial.ToTypedMessage(&freedom.Config{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listener, err := gonet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	dest := net.DestinationFromAddr(listener.Addr())
+	if conn, err := h.(*Handler).Dial(ctx, dest); err != nil {
+		t.Fatalf("an open outbound does not dial: %v", err)
+	} else {
+		conn.Close()
+	}
+	if accepted, err := listener.Accept(); err != nil {
+		t.Fatal(err)
+	} else {
+		accepted.Close()
+	}
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	got := append([]*internet.MemoryStreamConfig(nil), released...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] == nil {
+		t.Fatalf("released on close: %v", got)
+	}
+	conn, err := h.(*Handler).Dial(ctx, dest)
+	if err == nil {
+		conn.Close()
+		t.Fatal("a closed outbound dialed")
+	}
+	listener.(*gonet.TCPListener).SetDeadline(time.Now().Add(200 * time.Millisecond))
+	if accepted, err := listener.Accept(); err == nil {
+		accepted.Close()
+		t.Fatal("a closed outbound reached the server before it refused")
+	}
 }
