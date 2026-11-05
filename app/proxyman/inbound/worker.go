@@ -272,6 +272,7 @@ type udpWorker struct {
 
 	checker    *task.Periodic
 	activeConn map[connID]*udpConn
+	closed     bool // set by Close: packets still queued in the hub must not open new connections
 
 	ctx  context.Context
 	cone bool
@@ -281,6 +282,9 @@ func (w *udpWorker) getConnection(id connID) (*udpConn, bool) {
 	w.Lock()
 	defer w.Unlock()
 
+	if w.closed {
+		return nil, false
+	}
 	if conn, found := w.activeConn[id]; found && !conn.done.Done() {
 		conn.updateActivity()
 		return conn, true
@@ -322,16 +326,28 @@ func (w *udpWorker) callback(b *buf.Buffer, source net.Destination, originalDest
 		b.UDP = &originalDest
 	}
 	conn, existing := w.getConnection(id)
+	if conn == nil {
+		b.Release()
+		return
+	}
 
 	// payload will be discarded in pipe is full.
 	conn.writer.WriteMultiBuffer(buf.MultiBuffer{b})
 
 	if !existing {
-		common.Must(w.checker.Start())
+		// Start runs clean() at once, and clean() fails only on an empty activeConn: Close took the lock after
+		// getConnection and has already closed and dropped this conn. There is nothing to serve then.
+		if err := w.checker.Start(); err != nil {
+			conn.Close()
+			return
+		}
 
 		go func() {
 			ctx, cancel := context.WithCancel(w.ctx)
+			// Under the lock: Close and clean() read it while closing the conn.
+			w.Lock()
 			conn.cancel = cancel
+			w.Unlock()
 			sid := session.NewID()
 			ctx = c.ContextWithID(ctx, sid)
 
@@ -412,6 +428,7 @@ func (w *udpWorker) clean() error {
 
 func (w *udpWorker) Start() error {
 	w.activeConn = make(map[connID]*udpConn, 16)
+	w.closed = false
 	ctx := context.Background()
 	h, err := udp.ListenUDP(ctx, w.address, w.port, w.stream, udp.HubCapacity(256))
 	if err != nil {
@@ -434,6 +451,7 @@ func (w *udpWorker) Close() error {
 	w.Lock()
 	defer w.Unlock()
 
+	w.closed = true
 	var errs []interface{}
 
 	if w.hub != nil {
@@ -446,6 +464,16 @@ func (w *udpWorker) Close() error {
 		if err := w.checker.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+
+	// The checker was the only thing that ended idle connections. Close the ones left now, as clean() does:
+	// otherwise each keeps its Process goroutine, and the dispatcher pipes behind it, blocked for good.
+	for id, conn := range w.activeConn {
+		if !conn.inactive {
+			conn.setInactive()
+			delete(w.activeConn, id)
+		}
+		conn.Close()
 	}
 
 	if err := common.Close(w.proxy); err != nil {
