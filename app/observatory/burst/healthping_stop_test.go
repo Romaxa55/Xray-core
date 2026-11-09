@@ -43,14 +43,23 @@ func TestStopSchedulerCancelsScheduledProbes(t *testing.T) {
 	window := hp.Settings.Interval * time.Duration(hp.Settings.SamplingCount)
 
 	hp.StartScheduler(func() ([]string, error) { return tags, nil })
-	time.Sleep(100 * time.Millisecond)
+	// The initial round probes every tag at once: wait for it, not for a fixed
+	// pause, so a loaded machine does not stop the scheduler before it.
+	initial := int32(len(tags))
+	for deadline := time.Now().Add(5 * time.Second); dials.Load() < initial; {
+		if time.Now().After(deadline) {
+			t.Fatalf("initial round: %d dials of %d", dials.Load(), initial)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	hp.StopScheduler()
+	atStop := dials.Load()
 	time.Sleep(window + 500*time.Millisecond)
 
-	// The initial round probes every tag at once; of the scheduled round's
-	// 2 × 50 probes only those due in the first 100 ms may go out.
-	initial, scheduled := int32(len(tags)), int32(len(tags)*hp.Settings.SamplingCount)
-	if got := dials.Load(); got < initial || got >= initial+scheduled/2 {
-		t.Fatalf("dials = %d, want the %d initial probes and no scheduled ones after the stop", got, initial)
+	// Only a probe whose timer had fired by the stop may still dial; the
+	// scheduled round's other probes — about 2 × 50 over the window — must not.
+	const inFlight = 10
+	if late := dials.Load() - atStop; late > inFlight {
+		t.Fatalf("%d probes dialed after StopScheduler, want at most %d already in flight", late, inFlight)
 	}
 }
