@@ -337,6 +337,8 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 				// Сообщаем что dialerTag свалился на fallback-тег.
 				// Dart нарисует прямую линию exit→user (минуя bs).
 				notifyRoute(capturedDialer, "fallback:"+fbTag)
+				// Always redirect's cnc.Connection with TCP addresses: hysteria's FakePacketConn over this wrapper
+				// casts them on every ReadFrom (MegaV#355). Return anything else here and that panic is back.
 				return redirect(ctx, dest, fbTag, fbH), nil
 			}
 			return wrapFallback(ctx, primary, fallback), nil

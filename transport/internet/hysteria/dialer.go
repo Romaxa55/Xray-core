@@ -17,7 +17,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/finalmask"
@@ -57,10 +56,23 @@ func (c *client) status() status {
 	}
 }
 
+// closeQUIC closes a client's QUIC objects in the one order that works over a dialerProxy stream (MegaV#355): the
+// PacketConn before the Transport. Transport.Close waits for its read loop to exit and only sets a read deadline to
+// get there, which a cnc.Connection ignores, so the other order hangs until the proxy outbound drops the stream.
+func closeQUIC(conn *quic.Conn, code quic.ApplicationErrorCode, pktConn net.PacketConn, tr *quic.Transport) {
+	if conn != nil {
+		_ = conn.CloseWithError(code, "")
+	}
+	if pktConn != nil {
+		_ = pktConn.Close()
+	}
+	if tr != nil {
+		_ = tr.Close()
+	}
+}
+
 func (c *client) close() {
-	c.conn.CloseWithError(closeErrCodeOK, "")
-	c.tr.Close()
-	c.pktConn.Close()
+	closeQUIC(c.conn, closeErrCodeOK, c.pktConn, c.tr)
 	c.conn = nil
 	c.tr = nil
 	c.pktConn = nil
@@ -128,50 +140,50 @@ func (c *client) dial(ctx context.Context) error {
 			errors.LogInfoInner(context.Background(), err, "skip hop: failed to dial to dest")
 			return nil, errors.New("")
 		}
-
-		var pktConn net.PacketConn
-
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-		default:
-			panic(reflect.TypeOf(c))
+		w, ok := conn.(*internet.PacketConnWrapper)
+		if !ok {
+			if conn != nil {
+				conn.Close()
+			}
+			errors.LogInfo(context.Background(), "skip hop: not a UDP socket: ", reflect.TypeOf(conn))
+			return nil, errors.New("")
 		}
-
-		return pktConn, nil
+		return w.PacketConn, nil
 	}
 
 	var pktConn net.PacketConn
 	var udpAddr *net.UDPAddr
-	if len(quicParams.UdpHop.Ports) > 0 {
+	viaProxy := len(c.socketConfig.GetDialerProxy()) > 0
+	if len(quicParams.GetUdpHop().GetPorts()) > 0 { // nil UdpHop: a QuicParams not built from JSON
 		index := rand.Intn(len(quicParams.UdpHop.Ports))
 		c.dest.Port = net.Port(quicParams.UdpHop.Ports[index])
 		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = conn.RemoteAddr().(*net.UDPAddr)
-		default:
-			panic(reflect.TypeOf(c))
+		var socket bool
+		if pktConn, udpAddr, socket, err = hopPacketConn(conn, viaProxy); err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return err
 		}
-		pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+		if socket {
+			pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+		} else {
+			// Through dialerProxy there is one stream to the proxy, nothing to hop between: stay on the chosen port.
+			errors.LogInfo(ctx, "port hopping is off through dialerProxy, staying on port ", c.dest.Port)
+		}
 	} else {
 		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = c.RemoteAddr().(*net.UDPAddr)
-		case *cnc.Connection:
-			pktConn = &internet.FakePacketConn{Conn: c}
-			udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
-		default:
-			panic(reflect.TypeOf(c))
+		if pktConn, udpAddr, _, err = hopPacketConn(conn, viaProxy); err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return err
 		}
 	}
 
@@ -215,20 +227,14 @@ func (c *client) dial(ctx context.Context) error {
 	resp, err := rt.RoundTrip(req.WithContext(ctx))
 	if err != nil {
 		_ = rt.Close()
-		if conn != nil {
-			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
-		}
-		_ = tr.Close()
-		_ = pktConn.Close()
+		closeQUIC(conn, closeErrCodeProtocolError, pktConn, tr)
 		return err
 	}
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != StatusAuthOK {
 		_ = rt.Close()
-		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
-		_ = tr.Close()
-		_ = pktConn.Close()
+		closeQUIC(conn, closeErrCodeProtocolError, pktConn, tr)
 		return errors.New("auth failed code ", resp.StatusCode)
 	}
 
@@ -406,4 +412,31 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 func init() {
 	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
+}
+
+// hopPacketConn turns what internet.DialSystem returned into the PacketConn QUIC runs on: the UDP socket itself
+// (socket=true), or, with a dialerProxy (viaProxy), datagrams over its stream (cnc.Connection, or the fallback
+// wrapper of dialer_fallback.go around it). Anything else is an error, not a panic: a panic here kills the whole
+// process — the app on Windows, where the core runs inside it, the VPN service on Android (MegaV#355).
+func hopPacketConn(conn net.Conn, viaProxy bool) (pktConn net.PacketConn, udpAddr *net.UDPAddr, socket bool, err error) {
+	if conn == nil {
+		return nil, nil, false, errors.New("no connection to dest")
+	}
+	if w, ok := conn.(*internet.PacketConnWrapper); ok {
+		if addr, ok := w.RemoteAddr().(*net.UDPAddr); ok && addr != nil {
+			return w.PacketConn, addr, true, nil
+		}
+		return nil, nil, false, errors.New("unexpected remote address of a UDP socket: ", reflect.TypeOf(w.RemoteAddr()))
+	}
+	// A stream without a dialerProxy would be a plain TCP conn from a custom system dialer: QUIC does not run on it.
+	if !viaProxy {
+		return nil, nil, false, errors.New("not a UDP socket: ", reflect.TypeOf(conn))
+	}
+	// FakePacketConn reads both addresses as *net.TCPAddr: check them here, not in its ReadFrom.
+	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+	local, lok := conn.LocalAddr().(*net.TCPAddr)
+	if !ok || !lok || remote == nil || local == nil {
+		return nil, nil, false, errors.New("unsupported connection for hysteria: ", reflect.TypeOf(conn))
+	}
+	return &internet.FakePacketConn{Conn: conn}, &net.UDPAddr{IP: remote.IP, Port: remote.Port}, false, nil
 }
