@@ -58,6 +58,7 @@ type fallbackDialerConn struct {
 	armed     bool // true = ещё можем сделать fallback retry
 	promoted  bool // true = уже переключились на fallback (для diag)
 	committed bool // true = первый Read прошёл успешно, retry больше нельзя
+	closed    bool // Close was called: a fallback dialled after it is closed at once (MegaV#355)
 }
 
 // Write — буферизуем пока armed, иначе passthrough.
@@ -77,13 +78,14 @@ func (c *fallbackDialerConn) Write(b []byte) (int, error) {
 			c.bufSize += len(b)
 		}
 	}
+	conn := c.Conn // under the lock, see current
 	c.mu.Unlock()
-	return c.Conn.Write(b)
+	return conn.Write(b)
 }
 
 // Read — на первый ошибке (если ещё armed) делаем retry через fallback.
 func (c *fallbackDialerConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
+	n, err := c.current().Read(b)
 	if err == nil {
 		// успех первого Read → handshake прошёл, retry больше не нужен
 		c.mu.Lock()
@@ -132,9 +134,14 @@ func (c *fallbackDialerConn) Read(b []byte) (int, error) {
 		}
 	}
 
-	// success — заменяем conn под капотом
-	oldConn := c.Conn
+	// success — заменяем conn под капотом. Closed meanwhile: nobody would ever close fb.
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		fb.Close()
+		return n, err
+	}
+	oldConn := c.Conn
 	c.Conn = fb
 	c.promoted = true
 	c.mu.Unlock()
@@ -164,7 +171,36 @@ func (c *fallbackDialerConn) Read(b []byte) (int, error) {
 	}(oldConn)
 
 	// Теперь делаем Read через новый fb
-	return c.Conn.Read(b)
+	return fb.Read(b)
+}
+
+// current is the active conn. Read swaps c.Conn on a fallback, so every method takes it under the lock (MegaV#355).
+func (c *fallbackDialerConn) current() net.Conn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn
+}
+
+func (c *fallbackDialerConn) LocalAddr() net.Addr           { return c.current().LocalAddr() }
+func (c *fallbackDialerConn) RemoteAddr() net.Addr          { return c.current().RemoteAddr() }
+func (c *fallbackDialerConn) SetDeadline(t time.Time) error { return c.current().SetDeadline(t) }
+func (c *fallbackDialerConn) SetReadDeadline(t time.Time) error {
+	return c.current().SetReadDeadline(t)
+}
+func (c *fallbackDialerConn) SetWriteDeadline(t time.Time) error {
+	return c.current().SetWriteDeadline(t)
+}
+
+// Close disarms the fallback first (MegaV#355): the Read our own Close unblocks fails with an error that is no
+// chain failure (io.ErrClosedPipe from cnc), and a re-dial on it would leave a conn nobody closes.
+func (c *fallbackDialerConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.armed = false
+	c.writeBuf = nil
+	conn := c.Conn
+	c.mu.Unlock()
+	return conn.Close()
 }
 
 // wrapFallback создаёт обёртку. fallback — closure, который делает re-dial

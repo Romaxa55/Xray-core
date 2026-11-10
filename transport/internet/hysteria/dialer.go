@@ -16,7 +16,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/finalmask"
@@ -55,10 +54,44 @@ func (c *client) status() status {
 	}
 }
 
+// closeQUIC closes a client's QUIC objects in the one order that works over a dialerProxy stream (MegaV#355): the
+// PacketConn before the Transport. Transport.Close waits for its read loop to exit and only sets a read deadline to
+// get there, which a cnc.Connection ignores, so the other order hangs until the proxy outbound drops the stream.
+func closeQUIC(conn *quic.Conn, code quic.ApplicationErrorCode, pktConn net.PacketConn, tr *quic.Transport) {
+	if conn != nil {
+		_ = conn.CloseWithError(code, "")
+	}
+	if pktConn != nil {
+		_ = pktConn.Close()
+	}
+	if tr != nil {
+		_ = tr.Close()
+	}
+}
+
+// streamPacketConn turns what internet.DialSystem returned into the PacketConn QUIC runs on (MegaV#355): a UDP socket
+// as is, a dialerProxy stream (a cnc.Connection or the fork's fallback wrapper around one) as FakePacketConn. Anything
+// else is a dial error: upstream panics on it, which killed the whole app process. FakePacketConn reads the remote
+// address as *net.TCPAddr on every ReadFrom, so it is checked here.
+func streamPacketConn(conn net.Conn, viaProxy bool) (net.PacketConn, net.Addr, error) {
+	if conn == nil {
+		return nil, nil, errors.New("no connection to dest")
+	}
+	if w, ok := conn.(*net.PacketConnWrapper); ok {
+		return w.PacketConn, w.RemoteAddr(), nil
+	}
+	// A stream without a dialerProxy would be a plain TCP conn from a custom system dialer: QUIC does not run on it.
+	if !viaProxy {
+		return nil, nil, errors.New("not a UDP socket: ", reflect.TypeOf(conn))
+	}
+	if remote, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || remote == nil {
+		return nil, nil, errors.New("unsupported connection for hysteria: ", reflect.TypeOf(conn))
+	}
+	return &internet.FakePacketConn{Conn: conn}, &net.UDPAddr{IP: []byte{0, 0, 0, 0}}, nil
+}
+
 func (c *client) close() {
-	c.conn.CloseWithError(closeErrCodeOK, "")
-	c.tr.Close()
-	c.pktConn.Close()
+	closeQUIC(c.conn, closeErrCodeOK, c.pktConn, c.tr)
 	c.conn = nil
 	c.tr = nil
 	c.pktConn = nil
@@ -124,22 +157,25 @@ func (c *client) dial(ctx context.Context) error {
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		pktConn = conn.(*net.PacketConnWrapper).PacketConn
-		udpAddr = conn.RemoteAddr()
+		w, ok := conn.(*net.PacketConnWrapper)
+		if !ok {
+			if conn != nil {
+				conn.Close()
+			}
+			return errors.New("finalmask returned no UDP socket: ", reflect.TypeOf(conn))
+		}
+		pktConn = w.PacketConn
+		udpAddr = w.RemoteAddr()
 	} else {
 		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		switch c := conn.(type) {
-		case *net.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = c.RemoteAddr()
-		case *cnc.Connection:
-			pktConn = &internet.FakePacketConn{Conn: c}
-			udpAddr = &net.UDPAddr{IP: []byte{0, 0, 0, 0}}
-		default:
-			panic(reflect.TypeOf(c))
+		if pktConn, udpAddr, err = streamPacketConn(conn, len(c.socketConfig.GetDialerProxy()) > 0); err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return err
 		}
 	}
 
@@ -179,20 +215,14 @@ func (c *client) dial(ctx context.Context) error {
 	resp, err := rt.RoundTrip(req.WithContext(ctx))
 	if err != nil {
 		_ = rt.Close()
-		if conn != nil {
-			_ = conn.CloseWithError(closeErrCodeProtocolError, "")
-		}
-		_ = tr.Close()
-		_ = pktConn.Close()
+		closeQUIC(conn, closeErrCodeProtocolError, pktConn, tr)
 		return err
 	}
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != StatusAuthOK {
 		_ = rt.Close()
-		_ = conn.CloseWithError(closeErrCodeProtocolError, "")
-		_ = tr.Close()
-		_ = pktConn.Close()
+		closeQUIC(conn, closeErrCodeProtocolError, pktConn, tr)
 		return errors.New("auth failed code ", resp.StatusCode)
 	}
 
