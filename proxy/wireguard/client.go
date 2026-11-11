@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +17,6 @@ import (
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
@@ -151,19 +149,16 @@ func NewClient(ctx context.Context, conf *DeviceConfig) (*Handler, error) {
 			if err != nil {
 				return nil, errors.New("failed to dial to dest").Base(err)
 			}
-			pktConn = conn.(*net.PacketConnWrapper).PacketConn
+			if pktConn, _, err = internet.DialedPacketConnOrClose(conn, false); err != nil {
+				return nil, err
+			}
 		} else {
 			conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
 			if err != nil {
 				return nil, errors.New("failed to dial to dest").Base(err)
 			}
-			switch c := conn.(type) {
-			case *net.PacketConnWrapper:
-				pktConn = c.PacketConn
-			case *cnc.Connection:
-				pktConn = &internet.FakePacketConn{Conn: c}
-			default:
-				panic(reflect.TypeOf(c))
+			if pktConn, _, err = internet.DialedPacketConnOrClose(conn, len(streamSettings.SocketSettings.GetDialerProxy()) > 0); err != nil {
+				return nil, err
 			}
 		}
 		if uplinkCounter != nil || downlinkCounter != nil {

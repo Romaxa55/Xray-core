@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/netip"
-	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -16,7 +15,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
@@ -86,22 +84,16 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 		if err != nil {
 			return nil, errors.New("failed to dial to dest").Base(err)
 		}
-		pktConn = conn.(*net.PacketConnWrapper).PacketConn
-		udpAddr = conn.RemoteAddr()
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, false); err != nil {
+			return nil, err
+		}
 	} else {
 		conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
 		if err != nil {
 			return nil, errors.New("failed to dial to dest").Base(err)
 		}
-		switch c := conn.(type) {
-		case *net.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = c.RemoteAddr()
-		case *cnc.Connection:
-			pktConn = &internet.FakePacketConn{Conn: c}
-			udpAddr = &net.UDPAddr{IP: []byte{0, 0, 0, 0}}
-		default:
-			panic(reflect.TypeOf(c))
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, len(streamSettings.SocketSettings.GetDialerProxy()) > 0); err != nil {
+			return nil, err
 		}
 	}
 

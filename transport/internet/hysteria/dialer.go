@@ -5,7 +5,6 @@ import (
 	gotls "crypto/tls"
 	"net/http"
 	"net/url"
-	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -67,27 +66,6 @@ func closeQUIC(conn *quic.Conn, code quic.ApplicationErrorCode, pktConn net.Pack
 	if tr != nil {
 		_ = tr.Close()
 	}
-}
-
-// streamPacketConn turns what internet.DialSystem returned into the PacketConn QUIC runs on (MegaV#355): a UDP socket
-// as is, a dialerProxy stream (a cnc.Connection or the fork's fallback wrapper around one) as FakePacketConn. Anything
-// else is a dial error: upstream panics on it, which killed the whole app process. FakePacketConn reads the remote
-// address as *net.TCPAddr on every ReadFrom, so it is checked here.
-func streamPacketConn(conn net.Conn, viaProxy bool) (net.PacketConn, net.Addr, error) {
-	if conn == nil {
-		return nil, nil, errors.New("no connection to dest")
-	}
-	if w, ok := conn.(*net.PacketConnWrapper); ok {
-		return w.PacketConn, w.RemoteAddr(), nil
-	}
-	// A stream without a dialerProxy would be a plain TCP conn from a custom system dialer: QUIC does not run on it.
-	if !viaProxy {
-		return nil, nil, errors.New("not a UDP socket: ", reflect.TypeOf(conn))
-	}
-	if remote, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || remote == nil {
-		return nil, nil, errors.New("unsupported connection for hysteria: ", reflect.TypeOf(conn))
-	}
-	return &internet.FakePacketConn{Conn: conn}, &net.UDPAddr{IP: []byte{0, 0, 0, 0}}, nil
 }
 
 func (c *client) close() {
@@ -157,24 +135,15 @@ func (c *client) dial(ctx context.Context) error {
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		w, ok := conn.(*net.PacketConnWrapper)
-		if !ok {
-			if conn != nil {
-				conn.Close()
-			}
-			return errors.New("finalmask returned no UDP socket: ", reflect.TypeOf(conn))
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, false); err != nil {
+			return err
 		}
-		pktConn = w.PacketConn
-		udpAddr = w.RemoteAddr()
 	} else {
 		conn, err := internet.DialSystem(ctx, c.dest, c.socketConfig)
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		if pktConn, udpAddr, err = streamPacketConn(conn, len(c.socketConfig.GetDialerProxy()) > 0); err != nil {
-			if conn != nil {
-				conn.Close()
-			}
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, len(c.socketConfig.GetDialerProxy()) > 0); err != nil {
 			return err
 		}
 	}

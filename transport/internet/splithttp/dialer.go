@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -21,7 +20,6 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport/internet"
@@ -258,56 +256,7 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			QUICConfig:      quicConfig,
 			TLSClientConfig: gotlsConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
-				var pktConn net.PacketConn
-				var udpAddr net.Addr
-				if streamSettings.FinalMask != nil {
-					conn, err := streamSettings.FinalMask.DialUDP(ctx, dest)
-					if err != nil {
-						return nil, errors.New("failed to dial to dest").Base(err)
-					}
-					pktConn = conn.(*net.PacketConnWrapper).PacketConn
-					udpAddr = conn.RemoteAddr()
-				} else {
-					conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
-					if err != nil {
-						return nil, errors.New("failed to dial to dest").Base(err)
-					}
-					switch c := conn.(type) {
-					case *net.PacketConnWrapper:
-						pktConn = c.PacketConn
-						udpAddr = c.RemoteAddr()
-					case *cnc.Connection:
-						pktConn = &internet.FakePacketConn{Conn: c}
-						udpAddr = &net.UDPAddr{IP: []byte{0, 0, 0, 0}}
-					default:
-						panic(reflect.TypeOf(c))
-					}
-				}
-
-				tr := &quic.Transport{Conn: pktConn, DisableGSO: quicParams.DisableGSO}
-
-				if !quicParams.DisableChromeParrot {
-					tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
-					tlsCfg.GetCertificate = nil
-				}
-
-				conn, err := tr.DialEarly(ctx, udpAddr, tlsCfg, cfg)
-				if err != nil {
-					return nil, err
-				}
-				context.AfterFunc(conn.Context(), func() { tr.Close(); pktConn.Close() })
-
-				switch quicParams.Congestion {
-				case "reno":
-				case "", "bbr":
-					congestion.UseBBR(conn, bbr.Profile(quicParams.BbrProfile))
-				case "force-brutal":
-					congestion.UseBrutal(conn, quicParams.BrutalUp, quicParams.BrutalDisableLossCompensation)
-				default:
-					panic(quicParams.Congestion)
-				}
-
-				return conn, nil
+				return dialH3(ctx, dest, streamSettings, quicParams, tlsCfg, cfg)
 			},
 		}
 	} else if httpVersion == "2" {
@@ -665,4 +614,61 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 		writed += n
 	}
 	return writed, nil
+}
+
+// dialH3 opens the QUIC connection of XHTTP over HTTP/3. The PacketConn is closed before the Transport, also when
+// the handshake fails, as closeQUIC in hysteria (MegaV#355): Transport.Close waits for its read loop, which only a
+// read deadline stops, and a dialerProxy stream ignores deadlines, so the upstream order (tr first) held a dead
+// server behind a dialerProxy until the proxy outbound dropped the stream, 300 s by default (MegaV#360). Upstream
+// also left the PacketConn and the Transport open after a failed handshake: a UDP socket per failed dial.
+func dialH3(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, quicParams *internet.QuicParams, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	var pktConn net.PacketConn
+	var udpAddr net.Addr
+	if streamSettings.FinalMask != nil {
+		conn, err := streamSettings.FinalMask.DialUDP(ctx, dest)
+		if err != nil {
+			return nil, errors.New("failed to dial to dest").Base(err)
+		}
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, false); err != nil {
+			return nil, err
+		}
+	} else {
+		conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+		if err != nil {
+			return nil, errors.New("failed to dial to dest").Base(err)
+		}
+		if pktConn, udpAddr, err = internet.DialedPacketConnOrClose(conn, len(streamSettings.SocketSettings.GetDialerProxy()) > 0); err != nil {
+			return nil, err
+		}
+	}
+
+	tr := &quic.Transport{Conn: pktConn, DisableGSO: quicParams.DisableGSO}
+	closeAll := func() {
+		_ = pktConn.Close()
+		_ = tr.Close()
+	}
+
+	if !quicParams.DisableChromeParrot {
+		tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
+		tlsCfg.GetCertificate = nil
+	}
+
+	conn, err := tr.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+	if err != nil {
+		closeAll()
+		return nil, err
+	}
+	context.AfterFunc(conn.Context(), closeAll)
+
+	switch quicParams.Congestion {
+	case "reno":
+	case "", "bbr":
+		congestion.UseBBR(conn, bbr.Profile(quicParams.BbrProfile))
+	case "force-brutal":
+		congestion.UseBrutal(conn, quicParams.BrutalUp, quicParams.BrutalDisableLossCompensation)
+	default:
+		panic(quicParams.Congestion)
+	}
+
+	return conn, nil
 }

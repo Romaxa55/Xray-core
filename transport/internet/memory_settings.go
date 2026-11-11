@@ -2,11 +2,9 @@ package internet
 
 import (
 	"context"
-	"reflect"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/transport/internet/finalmask"
 )
 
@@ -78,19 +76,7 @@ func ToMemoryStreamConfig(s *StreamConfig) (*MemoryStreamConfig, error) {
 			if err != nil {
 				return nil, nil, err
 			}
-			var newConn net.PacketConn
-			var udpAddr net.Addr
-			switch c := conn.(type) {
-			case *net.PacketConnWrapper:
-				newConn = c.PacketConn
-				udpAddr = conn.RemoteAddr()
-			case *cnc.Connection:
-				newConn = &FakePacketConn{Conn: c}
-				udpAddr = &net.UDPAddr{IP: []byte{0, 0, 0, 0}, Port: 0}
-			default:
-				panic(reflect.TypeOf(c))
-			}
-			return newConn, udpAddr, nil
+			return DialedPacketConnOrClose(conn, len(mss.SocketSettings.GetDialerProxy()) > 0)
 		}
 		listenPacket := func(ctx context.Context, addr net.Addr) (net.PacketConn, error) {
 			return ListenSystemPacket(ctx, addr, mss.SocketSettings)
