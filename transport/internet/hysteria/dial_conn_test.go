@@ -42,11 +42,11 @@ func proxyStream() net.Conn {
 
 // MegaV#355: what internet.DialSystem returns through a dialerProxy used to reach panic(reflect.TypeOf(c)) in
 // dial, which killed the whole process.
-func TestHopPacketConn(t *testing.T) {
+func TestDialedPacketConn(t *testing.T) {
 	t.Run("dialerProxy stream", func(t *testing.T) {
 		conn := proxyStream()
 		defer conn.Close()
-		pc, addr, socket, err := hopPacketConn(conn, true)
+		pc, addr, socket, err := internet.DialedPacketConn(conn, true)
 		if err != nil || socket || addr == nil {
 			t.Fatalf("got socket=%v addr=%v err=%v, want a fake packet conn", socket, addr, err)
 		}
@@ -59,7 +59,7 @@ func TestHopPacketConn(t *testing.T) {
 		// The fallback wrapper of dialer_fallback.go hides the cnc type the same way.
 		conn := struct{ net.Conn }{proxyStream()}
 		defer conn.Close()
-		if _, _, socket, err := hopPacketConn(conn, true); err != nil || socket {
+		if _, _, socket, err := internet.DialedPacketConn(conn, true); err != nil || socket {
 			t.Fatalf("got socket=%v err=%v, want a fake packet conn", socket, err)
 		}
 	})
@@ -67,7 +67,7 @@ func TestHopPacketConn(t *testing.T) {
 	t.Run("stream without dialerProxy is an error", func(t *testing.T) {
 		conn := proxyStream()
 		defer conn.Close()
-		if _, _, _, err := hopPacketConn(conn, false); err == nil {
+		if _, _, _, err := internet.DialedPacketConn(conn, false); err == nil {
 			t.Fatal("want an error: QUIC does not run on a plain stream")
 		}
 	})
@@ -80,7 +80,7 @@ func TestHopPacketConn(t *testing.T) {
 		defer udp.Close()
 		dest := &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 443}
 		for _, viaProxy := range []bool{false, true} {
-			pc, addr, socket, err := hopPacketConn(&internet.PacketConnWrapper{PacketConn: udp, Dest: dest}, viaProxy)
+			pc, addr, socket, err := internet.DialedPacketConn(&internet.PacketConnWrapper{PacketConn: udp, Dest: dest}, viaProxy)
 			if err != nil || !socket || pc != udp || addr.Port != 443 {
 				t.Fatalf("viaProxy=%v: got pc=%T socket=%v addr=%v err=%v, want the socket itself", viaProxy, pc, socket, addr, err)
 			}
@@ -93,7 +93,7 @@ func TestHopPacketConn(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer udp.Close()
-		if _, _, _, err := hopPacketConn(&internet.PacketConnWrapper{PacketConn: udp, Dest: &net.IPAddr{}}, false); err == nil {
+		if _, _, _, err := internet.DialedPacketConn(&internet.PacketConnWrapper{PacketConn: udp, Dest: &net.IPAddr{}}, false); err == nil {
 			t.Fatal("want an error for a remote address that is not *net.UDPAddr")
 		}
 	})
@@ -102,10 +102,10 @@ func TestHopPacketConn(t *testing.T) {
 		a, b := gonet.Pipe()
 		defer a.Close()
 		defer b.Close()
-		if _, _, _, err := hopPacketConn(a, true); err == nil {
+		if _, _, _, err := internet.DialedPacketConn(a, true); err == nil {
 			t.Fatal("want an error for a conn without TCP addresses")
 		}
-		if _, _, _, err := hopPacketConn(nil, true); err == nil {
+		if _, _, _, err := internet.DialedPacketConn(nil, true); err == nil {
 			t.Fatal("want an error for no conn")
 		}
 	})
@@ -115,7 +115,7 @@ func TestHopPacketConn(t *testing.T) {
 // PacketConn, then the Transport. Transport.Close waits for its read loop and only sets a read deadline to end it,
 // which a cnc.Connection ignores: the other order hangs until the proxy outbound closes the stream (connIdle, 300 s).
 func TestCloseOverProxyStream(t *testing.T) {
-	pc, addr, _, err := hopPacketConn(proxyStream(), true)
+	pc, addr, _, err := internet.DialedPacketConn(proxyStream(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestClientClose(t *testing.T) {
 			cnc.ConnectionOnClose(common.ChainedClosable{uw, dw}))
 		srv := cnc.NewConnection(cnc.ConnectionInputMulti(dw), cnc.ConnectionOutputMultiUDP(ur))
 		defer quicServer(t, &internet.FakePacketConn{Conn: srv})()
-		pc, addr, _, err := hopPacketConn(cli, true)
+		pc, addr, _, err := internet.DialedPacketConn(cli, true)
 		if err != nil {
 			t.Fatal(err)
 		}

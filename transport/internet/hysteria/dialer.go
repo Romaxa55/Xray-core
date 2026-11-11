@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -140,15 +139,12 @@ func (c *client) dial(ctx context.Context) error {
 			errors.LogInfoInner(context.Background(), err, "skip hop: failed to dial to dest")
 			return nil, errors.New("")
 		}
-		w, ok := conn.(*internet.PacketConnWrapper)
-		if !ok {
-			if conn != nil {
-				conn.Close()
-			}
-			errors.LogInfo(context.Background(), "skip hop: not a UDP socket: ", reflect.TypeOf(conn))
+		pktConn, err := internet.UDPHopSocket(conn)
+		if err != nil {
+			errors.LogInfoInner(context.Background(), err, "skip hop")
 			return nil, errors.New("")
 		}
-		return w.PacketConn, nil
+		return pktConn, nil
 	}
 
 	var pktConn net.PacketConn
@@ -162,7 +158,7 @@ func (c *client) dial(ctx context.Context) error {
 			return errors.New("failed to dial to dest").Base(err)
 		}
 		var socket bool
-		if pktConn, udpAddr, socket, err = hopPacketConn(conn, viaProxy); err != nil {
+		if pktConn, udpAddr, socket, err = internet.DialedPacketConn(conn, viaProxy); err != nil {
 			if conn != nil {
 				conn.Close()
 			}
@@ -179,7 +175,7 @@ func (c *client) dial(ctx context.Context) error {
 		if err != nil {
 			return errors.New("failed to dial to dest").Base(err)
 		}
-		if pktConn, udpAddr, _, err = hopPacketConn(conn, viaProxy); err != nil {
+		if pktConn, udpAddr, _, err = internet.DialedPacketConn(conn, viaProxy); err != nil {
 			if conn != nil {
 				conn.Close()
 			}
@@ -412,31 +408,4 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *internet.Me
 
 func init() {
 	common.Must(internet.RegisterTransportDialer(protocolName, Dial))
-}
-
-// hopPacketConn turns what internet.DialSystem returned into the PacketConn QUIC runs on: the UDP socket itself
-// (socket=true), or, with a dialerProxy (viaProxy), datagrams over its stream (cnc.Connection, or the fallback
-// wrapper of dialer_fallback.go around it). Anything else is an error, not a panic: a panic here kills the whole
-// process — the app on Windows, where the core runs inside it, the VPN service on Android (MegaV#355).
-func hopPacketConn(conn net.Conn, viaProxy bool) (pktConn net.PacketConn, udpAddr *net.UDPAddr, socket bool, err error) {
-	if conn == nil {
-		return nil, nil, false, errors.New("no connection to dest")
-	}
-	if w, ok := conn.(*internet.PacketConnWrapper); ok {
-		if addr, ok := w.RemoteAddr().(*net.UDPAddr); ok && addr != nil {
-			return w.PacketConn, addr, true, nil
-		}
-		return nil, nil, false, errors.New("unexpected remote address of a UDP socket: ", reflect.TypeOf(w.RemoteAddr()))
-	}
-	// A stream without a dialerProxy would be a plain TCP conn from a custom system dialer: QUIC does not run on it.
-	if !viaProxy {
-		return nil, nil, false, errors.New("not a UDP socket: ", reflect.TypeOf(conn))
-	}
-	// FakePacketConn reads both addresses as *net.TCPAddr: check them here, not in its ReadFrom.
-	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
-	local, lok := conn.LocalAddr().(*net.TCPAddr)
-	if !ok || !lok || remote == nil || local == nil {
-		return nil, nil, false, errors.New("unsupported connection for hysteria: ", reflect.TypeOf(conn))
-	}
-	return &internet.FakePacketConn{Conn: conn}, &net.UDPAddr{IP: remote.IP, Port: remote.Port}, false, nil
 }

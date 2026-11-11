@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	reflect "reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -22,7 +21,6 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/common/uuid"
@@ -264,73 +262,10 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
 			QUICConfig:      quicConfig,
 			TLSClientConfig: gotlsConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
-				udpHopDialer := func(addr *net.UDPAddr) (net.PacketConn, error) {
-					conn, err := internet.DialSystem(ctx, net.UDPDestination(net.IPAddress(addr.IP), net.Port(addr.Port)), streamSettings.SocketSettings)
-					if err != nil {
-						errors.LogInfoInner(context.Background(), err, "skip hop: failed to dial to dest")
-						return nil, errors.New("")
-					}
-
-					var pktConn net.PacketConn
-
-					switch c := conn.(type) {
-					case *internet.PacketConnWrapper:
-						pktConn = c.PacketConn
-					default:
-						panic(reflect.TypeOf(c))
-					}
-
-					return pktConn, nil
-				}
-
-				var pktConn net.PacketConn
-				var udpAddr *net.UDPAddr
-				if len(quicParams.UdpHop.Ports) > 0 {
-					index := rand.Intn(len(quicParams.UdpHop.Ports))
-					dest.Port = net.Port(quicParams.UdpHop.Ports[index])
-					conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
-					if err != nil {
-						return nil, errors.New("failed to dial to dest").Base(err)
-					}
-					switch c := conn.(type) {
-					case *internet.PacketConnWrapper:
-						pktConn = c.PacketConn
-						udpAddr = conn.RemoteAddr().(*net.UDPAddr)
-					default:
-						panic(reflect.TypeOf(c))
-					}
-					pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
-				} else {
-					conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
-					if err != nil {
-						return nil, errors.New("failed to dial to dest").Base(err)
-					}
-					switch c := conn.(type) {
-					case *internet.PacketConnWrapper:
-						pktConn = c.PacketConn
-						udpAddr = c.RemoteAddr().(*net.UDPAddr)
-					case *cnc.Connection:
-						pktConn = &internet.FakePacketConn{Conn: c}
-						udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
-					default:
-						panic(reflect.TypeOf(c))
-					}
-				}
-
-				if streamSettings.UdpmaskManager != nil {
-					newConn, err := streamSettings.UdpmaskManager.WrapPacketConnClient(pktConn)
-					if err != nil {
-						pktConn.Close()
-						return nil, errors.New("mask err").Base(err)
-					}
-					pktConn = newConn
-				}
-
-				conn, err := quic.DialEarly(ctx, pktConn, udpAddr, tlsCfg, cfg)
+				conn, err := dialH3(ctx, dest, streamSettings, quicParams, tlsCfg, cfg)
 				if err != nil {
 					return nil, err
 				}
-				context.AfterFunc(conn.Context(), func() { pktConn.Close() })
 
 				switch quicParams.Congestion {
 				case "reno":
@@ -702,3 +637,93 @@ func (w uploadWriter) Write(b []byte) (int, error) {
 	}
 	return writed, nil
 }
+
+// h3PacketConn dials the UDP dest XHTTP over HTTP/3 runs on. Through a dialerProxy, DialSystem returns a stream
+// (cnc.Connection, or the fallback wrapper of dialer_fallback.go around it) that used to reach
+// panic(reflect.TypeOf(c)) here and kill the whole process (MegaV#360, as hysteria in MegaV#355): it becomes
+// datagrams over that stream on the chosen port, port hopping off (one stream, nothing to hop between); anything
+// else is a dial error.
+func h3PacketConn(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, quicParams *internet.QuicParams) (net.PacketConn, *net.UDPAddr, error) {
+	udpHopDialer := func(addr *net.UDPAddr) (net.PacketConn, error) {
+		conn, err := internet.DialSystem(ctx, net.UDPDestination(net.IPAddress(addr.IP), net.Port(addr.Port)), streamSettings.SocketSettings)
+		if err != nil {
+			errors.LogInfoInner(context.Background(), err, "skip hop: failed to dial to dest")
+			return nil, errors.New("")
+		}
+		pktConn, err := internet.UDPHopSocket(conn)
+		if err != nil {
+			errors.LogInfoInner(context.Background(), err, "skip hop")
+			return nil, errors.New("")
+		}
+		return pktConn, nil
+	}
+
+	hop := len(quicParams.GetUdpHop().GetPorts()) > 0
+	var index int
+	if hop {
+		index = rand.Intn(len(quicParams.UdpHop.Ports))
+		dest.Port = net.Port(quicParams.UdpHop.Ports[index])
+	}
+	conn, err := internet.DialSystem(ctx, dest, streamSettings.SocketSettings)
+	if err != nil {
+		return nil, nil, errors.New("failed to dial to dest").Base(err)
+	}
+	pktConn, udpAddr, socket, err := internet.DialedPacketConn(conn, len(streamSettings.SocketSettings.GetDialerProxy()) > 0)
+	if err != nil {
+		if conn != nil {
+			conn.Close()
+		}
+		return nil, nil, err
+	}
+	if hop {
+		if socket {
+			pktConn = udphop.NewUDPHopPacketConn(udphop.ToAddrs(udpAddr.IP, quicParams.UdpHop.Ports), time.Duration(quicParams.UdpHop.IntervalMin)*time.Second, time.Duration(quicParams.UdpHop.IntervalMax)*time.Second, udpHopDialer, pktConn, index)
+		} else {
+			errors.LogInfo(ctx, "port hopping is off through dialerProxy, staying on port ", dest.Port)
+		}
+	}
+
+	if streamSettings.UdpmaskManager != nil {
+		newConn, err := streamSettings.UdpmaskManager.WrapPacketConnClient(pktConn)
+		if err != nil {
+			pktConn.Close()
+			return nil, nil, errors.New("mask err").Base(err)
+		}
+		pktConn = newConn
+	}
+	return pktConn, udpAddr, nil
+}
+
+// dialH3 opens the QUIC connection of XHTTP over HTTP/3 on a Transport of its own and closes the PacketConn before
+// it, as closeQUIC in hysteria (MegaV#355). quic.DialEarly's single-use Transport closes itself when the handshake
+// fails and waits for its read loop, which only a read deadline stops; a dialerProxy stream ignores deadlines, so a
+// dead server behind a dialerProxy held the dial until the proxy outbound dropped the stream (MegaV#360).
+func dialH3(ctx context.Context, dest net.Destination, streamSettings *internet.MemoryStreamConfig, quicParams *internet.QuicParams, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	pktConn, udpAddr, err := h3PacketConn(ctx, dest, streamSettings, quicParams)
+	if err != nil {
+		return nil, err
+	}
+	tr := &quic.Transport{Conn: pktConn, ConnectionIDGenerator: emptyConnIDs{}}
+	closeAll := func() {
+		_ = pktConn.Close()
+		_ = tr.Close()
+	}
+	conn, err := tr.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+	if err != nil {
+		closeAll()
+		return nil, err
+	}
+	context.AfterFunc(conn.Context(), closeAll)
+	return conn, nil
+}
+
+// emptyConnIDs keeps the client's connection IDs empty, as on the single-use Transport of quic.DialEarly: a
+// Transport of our own would use 4 bytes and change how the handshake looks on the wire. One connection per
+// Transport, so nothing to demultiplex.
+type emptyConnIDs struct{}
+
+func (emptyConnIDs) GenerateConnectionID() (quic.ConnectionID, error) {
+	return quic.ConnectionID{}, nil
+}
+
+func (emptyConnIDs) ConnectionIDLen() int { return 0 }

@@ -3,7 +3,6 @@ package kcp
 import (
 	"context"
 	"io"
-	reflect "reflect"
 	"sync/atomic"
 
 	"github.com/xtls/xray-core/common"
@@ -11,7 +10,6 @@ import (
 	"github.com/xtls/xray-core/common/dice"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"github.com/xtls/xray-core/transport/internet/tls"
@@ -57,17 +55,14 @@ func DialKCP(ctx context.Context, dest net.Destination, streamSettings *internet
 	}
 
 	if streamSettings.UdpmaskManager != nil {
-		var pktConn net.PacketConn
-		var udpAddr *net.UDPAddr
-		switch c := conn.(type) {
-		case *internet.PacketConnWrapper:
-			pktConn = c.PacketConn
-			udpAddr = c.RemoteAddr().(*net.UDPAddr)
-		case *cnc.Connection:
-			pktConn = &internet.FakePacketConn{Conn: c}
-			udpAddr = &net.UDPAddr{IP: c.RemoteAddr().(*net.TCPAddr).IP, Port: c.RemoteAddr().(*net.TCPAddr).Port}
-		default:
-			panic(reflect.TypeOf(c))
+		// Through a dialerProxy this is a stream, also inside the fallback wrapper of dialer_fallback.go, which hid
+		// the cnc type from the switch here and reached panic(reflect.TypeOf(c)): the whole process died (MegaV#360).
+		pktConn, udpAddr, _, err := internet.DialedPacketConn(conn, len(streamSettings.SocketSettings.GetDialerProxy()) > 0)
+		if err != nil {
+			if conn != nil {
+				conn.Close()
+			}
+			return nil, errors.New("mKCP with udpmask").Base(err)
 		}
 		newConn, err := streamSettings.UdpmaskManager.WrapPacketConnClient(pktConn)
 		if err != nil {
