@@ -12,6 +12,8 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/core"
+	dns_feature "github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/pipe"
@@ -49,7 +51,15 @@ func (*silentRoute) DispatchLink(context.Context, net.Destination, *transport.Li
 	return errors.New("not used")
 }
 
+// On Go 1.27 with x/net/http2 v0.61 (as the fork's go.mod has it) a dial
+// outlives the request that started it. On older Go, or with the http2legacy
+// tag, a dial ends with its first request, and this test passes without the
+// dial deadline too.
 func TestDOHNameServerEndsSilentDial(t *testing.T) {
+	inst, err := core.New(&core.Config{})
+	common.Must(err)
+	// A dispatched DNS connection takes the instance from the query's context.
+	parent := context.WithValue(context.Background(), core.XrayKey(1), inst)
 	route := &silentRoute{closed: make(chan struct{}, 8)}
 	u, err := url.Parse("https://dns.example/dns-query")
 	common.Must(err)
@@ -58,9 +68,12 @@ func TestDOHNameServerEndsSilentDial(t *testing.T) {
 	// Each query gives up after a second; the dial the first one started
 	// is not bound to it and must end by its own deadline, so that a later
 	// query dials again — by the route of that moment.
-	until := time.Now().Add(10 * time.Second)
+	until := time.Now().Add(15 * time.Second)
 	for route.dials.Load() < 2 && time.Now().Before(until) {
-		if lookup(s, "a.example.com", time.Second) == nil {
+		ctx, cancel := context.WithTimeout(parent, time.Second)
+		_, _, err := s.QueryIP(ctx, "a.example.com", dns_feature.IPOption{IPv4Enable: true})
+		cancel()
+		if err == nil {
 			t.Fatal("an answer through a silent route")
 		}
 	}

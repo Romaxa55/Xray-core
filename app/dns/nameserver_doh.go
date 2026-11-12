@@ -33,7 +33,9 @@ import (
 // outlives the request's deadline, and later requests to the server wait for
 // it. A dial routed through an outbound that accepts and then passes nothing
 // would otherwise never end, and the server would answer nothing until the
-// remote side reset the connection.
+// remote side reset the connection. 4 s is the default server timeout, and
+// what a dial lived before: x/net/http2 on older Go dialed with the context
+// of the first request.
 const dohDialTimeout = 4 * time.Second
 
 // DoHNameServer implemented DNS over HTTPS (RFC8484) Wire Format,
@@ -84,6 +86,10 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 					link, err := dispatcher.Dispatch(dnsCtx, dest)
 					select {
 					case <-ctx.Done():
+						if err == nil {
+							common.Close(link.Writer)
+							common.Interrupt(link.Reader)
+						}
 						return nil, ctx.Err()
 					default:
 					}
@@ -117,6 +123,7 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 				if !h2c {
 					conn = utls.UClient(conn, &utls.Config{ServerName: url.Hostname()}, utls.HelloChrome_Auto)
 					if err := conn.(*utls.UConn).HandshakeContext(ctx); err != nil {
+						conn.Close()
 						return nil, err
 					}
 				}
