@@ -22,9 +22,11 @@ import (
 )
 
 // dohStub answers every A question with 192.0.2.1 over h2c; a name that
-// starts with "slow." is answered only after its request is gone.
-func dohStub(t *testing.T) string {
+// starts with "slow." is answered only after its request is gone, and its
+// arrival is told on the channel.
+func dohStub(t *testing.T) (string, <-chan struct{}) {
 	t.Helper()
+	slowArrived := make(chan struct{}, 8)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		var msg dnsmessage.Message
@@ -34,6 +36,7 @@ func dohStub(t *testing.T) string {
 		}
 		q := msg.Questions[0]
 		if strings.HasPrefix(q.Name.String(), "slow.") {
+			slowArrived <- struct{}{}
 			<-r.Context().Done()
 			return
 		}
@@ -57,7 +60,7 @@ func dohStub(t *testing.T) string {
 	srv := &http.Server{Handler: h2c.NewHandler(handler, &http2.Server{})}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	return ln.Addr().String()
+	return ln.Addr().String(), slowArrived
 }
 
 // silencer relays connections to target; silence makes the connections open
@@ -144,7 +147,8 @@ func lookup(s *DoHNameServer, name string, within time.Duration) error {
 }
 
 func TestDOHNameServerDropsSilentConnection(t *testing.T) {
-	front := newSilencer(t, dohStub(t))
+	addr, _ := dohStub(t)
+	front := newSilencer(t, addr)
 	s := front.server(t)
 
 	common.Must(lookup(s, "a.example.com", 3*time.Second))
@@ -166,13 +170,18 @@ func TestDOHNameServerDropsSilentConnection(t *testing.T) {
 }
 
 func TestDOHNameServerKeepsAnsweringConnection(t *testing.T) {
-	front := newSilencer(t, dohStub(t))
+	addr, slowArrived := dohStub(t)
+	front := newSilencer(t, addr)
 	s := front.server(t)
 
 	common.Must(lookup(s, "a.example.com", 3*time.Second))
 	slow := make(chan error, 1)
-	go func() { slow <- lookup(s, "slow.example.com", time.Second) }()
-	time.Sleep(300 * time.Millisecond)
+	go func() { slow <- lookup(s, "slow.example.com", 3*time.Second) }()
+	select {
+	case <-slowArrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the slow query never reached the server")
+	}
 	// Answered after the slow one was sent: the connection is alive.
 	common.Must(lookup(s, "b.example.com", 3*time.Second))
 	if err := <-slow; err == nil {

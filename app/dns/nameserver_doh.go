@@ -285,7 +285,8 @@ func (s *DoHNameServer) track(conn net.Conn) net.Conn {
 // silent — a proxy server that stopped relaying — stays silent even after
 // routing moved on to another outbound, and every name waits for it. Closed,
 // the next query dials again by the routing of now. A connection that still
-// answers other queries is not one of them.
+// answers other queries is not one of them. A query that happens to go down
+// a connection as it closes fails and goes on to the next server.
 func (s *DoHNameServer) dropSilentSince(sent time.Time) {
 	since := sent.UnixNano()
 	var silent []*dohConn
