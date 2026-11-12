@@ -28,6 +28,16 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// dohDialTimeout bounds a dial with its TLS handshake. net/http (Go 1.27,
+// and x/net/http2 on it) dials apart from the request that asked: the dial
+// outlives the request's deadline, and later requests to the server wait for
+// it. A dial routed through an outbound that accepts and then passes nothing
+// would otherwise never end, and the server would answer nothing until the
+// remote side reset the connection. 4 s is the default server timeout, and
+// what a dial lived before: x/net/http2 on older Go dialed with the context
+// of the first request.
+const dohDialTimeout = 4 * time.Second
+
 // DoHNameServer implemented DNS over HTTPS (RFC8484) Wire Format,
 // which is compatible with traditional dns over udp(RFC1035),
 // thus most of the DOH implementation is copied from udpns.go
@@ -60,6 +70,8 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 			IdleConnTimeout: net.ConnIdleTimeout,
 			ReadIdleTimeout: net.ChromeH2KeepAlivePeriod,
 			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+				ctx, cancel := context.WithTimeout(ctx, dohDialTimeout)
+				defer cancel()
 				dest, err := net.ParseDestination(network + ":" + addr)
 				if err != nil {
 					return nil, err
@@ -74,6 +86,10 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 					link, err := dispatcher.Dispatch(dnsCtx, dest)
 					select {
 					case <-ctx.Done():
+						if err == nil {
+							common.Close(link.Writer)
+							common.Interrupt(link.Reader)
+						}
 						return nil, ctx.Err()
 					default:
 					}
@@ -107,6 +123,7 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 				if !h2c {
 					conn = utls.UClient(conn, &utls.Config{ServerName: url.Hostname()}, utls.HelloChrome_Auto)
 					if err := conn.(*utls.UConn).HandshakeContext(ctx); err != nil {
+						conn.Close()
 						return nil, err
 					}
 				}
