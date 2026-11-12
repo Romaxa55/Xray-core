@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -34,6 +36,10 @@ type DoHNameServer struct {
 	httpClient      *http.Client
 	dohURL          string
 	clientIP        net.IP
+
+	// conns are the connections this server dialed and still holds open.
+	connsMu sync.Mutex
+	conns   map[*dohConn]struct{}
 }
 
 // NewDoHNameServer creates DOH/DOHL client object for remote/local resolving.
@@ -104,7 +110,7 @@ func NewDoHNameServer(url *url.URL, dispatcher routing.Dispatcher, h2c bool, dis
 						return nil, err
 					}
 				}
-				return conn, nil
+				return s.track(conn), nil
 			},
 		},
 	}
@@ -219,8 +225,10 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 
 	hc := s.httpClient
 
+	sent := time.Now()
 	resp, err := hc.Do(req.WithContext(ctx))
 	if err != nil {
+		s.dropSilentSince(sent)
 		return nil, err
 	}
 
@@ -231,6 +239,67 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte, 
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// dohConn is a connection of a DoH server that knows when it last read
+// anything.
+type dohConn struct {
+	net.Conn
+	owner    *DoHNameServer
+	lastRead atomic.Int64 // UnixNano
+}
+
+func (c *dohConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.lastRead.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c *dohConn) Close() error {
+	c.owner.connsMu.Lock()
+	delete(c.owner.conns, c)
+	c.owner.connsMu.Unlock()
+	return c.Conn.Close()
+}
+
+// track keeps conn among the server's connections; its handshake, if any,
+// was its last read.
+func (s *DoHNameServer) track(conn net.Conn) net.Conn {
+	c := &dohConn{Conn: conn, owner: s}
+	c.lastRead.Store(time.Now().UnixNano())
+	s.connsMu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*dohConn]struct{})
+	}
+	s.conns[c] = struct{}{}
+	s.connsMu.Unlock()
+	return c
+}
+
+// dropSilentSince closes the connections that read nothing since a query
+// that failed was sent. The HTTP/2 transport would keep sending queries down
+// such a connection until its ping health check gives up on it, a minute
+// after its last frame; a connection dialed through an outbound that went
+// silent — a proxy server that stopped relaying — stays silent even after
+// routing moved on to another outbound, and every name waits for it. Closed,
+// the next query dials again by the routing of now. A connection that still
+// answers other queries is not one of them.
+func (s *DoHNameServer) dropSilentSince(sent time.Time) {
+	since := sent.UnixNano()
+	var silent []*dohConn
+	s.connsMu.Lock()
+	for c := range s.conns {
+		if c.lastRead.Load() < since {
+			silent = append(silent, c)
+		}
+	}
+	s.connsMu.Unlock()
+	for _, c := range silent {
+		errors.LogInfo(context.Background(), s.Name(), " closes a connection silent since a failed query")
+		c.Close()
+	}
 }
 
 // QueryIP implements Server.
