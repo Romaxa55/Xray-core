@@ -152,14 +152,11 @@ func (c *fallbackDialerConn) Read(b []byte) (int, error) {
 	// goroutine утечёт навсегда → growing baseline на каждый fallback.
 	// Добавляем 3-sec deadline и recover от panic в Close.
 	go func(c net.Conn) {
-		defer func() {
-			if r := recover(); r != nil {
-				// ignore — close уже мог быть вызван
-			}
-		}()
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
+			// recover здесь, в горутине Close: recover другой горутины панику не ловит, процесс упал бы целиком
+			defer func() { _ = recover() }()
 			_ = c.Close()
 		}()
 		select {

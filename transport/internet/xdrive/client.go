@@ -5,7 +5,6 @@ import (
 	gotls "crypto/tls"
 	"io"
 	"net/http"
-	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -15,7 +14,6 @@ import (
 	"github.com/apernet/quic-go/http3"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/utils"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
@@ -270,18 +268,12 @@ func newServiceClient(connCtx context.Context, h1Hosts *sync.Map, streamSettings
 				if err != nil {
 					return nil, err
 				}
-				var pktConn net.PacketConn
-				var udpAddr net.Addr
-				switch c := conn.(type) {
-				case *net.PacketConnWrapper:
-					pktConn = c.PacketConn
-					udpAddr = c.RemoteAddr()
-				case *cnc.Connection:
-					pktConn = &internet.FakePacketConn{Conn: c}
-					udpAddr = &net.UDPAddr{IP: []byte{0, 0, 0, 0}}
-				default:
-					conn.Close()
-					return nil, errors.New("failed to dial to dest: unexpected ", reflect.TypeOf(c))
+				// a socket, or a stream as upstream took a cnc one: of a dialerProxy, also behind the fallback
+				// wrapper of dialer_fallback.go, or of an alternative system dialer (FinalMask always wraps its
+				// PacketConn, whatever is under it, so the flag does not matter there)
+				pktConn, udpAddr, err := internet.DialedPacketConnOrClose(conn, true)
+				if err != nil {
+					return nil, errors.New("failed to dial to dest").Base(err)
 				}
 
 				// built for each dial with the host as SNI, as for h2: http3 sets the
@@ -295,12 +287,13 @@ func newServiceClient(connCtx context.Context, h1Hosts *sync.Map, streamSettings
 				}
 				qconn, err := tr.Dial(ctx, udpAddr, gotlsConfig, cfg)
 				if err != nil {
-					tr.Close()
+					// pktConn first: over a dialerProxy stream tr.Close waits for its read loop until the conn closes
 					pktConn.Close()
+					tr.Close()
 					return nil, err
 				}
 				stop := context.AfterFunc(connCtx, func() { qconn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "") })
-				context.AfterFunc(qconn.Context(), func() { stop(); tr.Close(); pktConn.Close() })
+				context.AfterFunc(qconn.Context(), func() { stop(); pktConn.Close(); tr.Close() })
 				if quicParams.Congestion != "reno" {
 					congestion.UseBBR(qconn, bbr.Profile(quicParams.BbrProfile))
 				}

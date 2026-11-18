@@ -68,6 +68,13 @@ func NewDOHResolver(config *ResolverProto, dialer *finalmask.Dialer) (Resolver, 
 			TLSClientConfig: config.TlsConfig.GetTLSConfig(),
 			QUICConfig:      quicConfig,
 			Dial: func(ctx context.Context, addr string, tlsCfg *gotls.Config, cfg *quic.Config) (*quic.Conn, error) {
+				// checked before the dial: upstream's panic here, in a goroutine of http3, ended the whole process,
+				// and "brutal" (which the config builder lets through) reached it
+				switch quicParams.Congestion {
+				case "", "reno", "bbr", "brutal", "force-brutal":
+				default:
+					return nil, errors.New("unknown congestion control: ", quicParams.Congestion)
+				}
 				dest, err := net.ParseDestination("udp:" + addr)
 				if err != nil {
 					return nil, err
@@ -82,19 +89,20 @@ func NewDOHResolver(config *ResolverProto, dialer *finalmask.Dialer) (Resolver, 
 					tr.ConnectionIDGenerator = quic.ZeroLengthConnectionIDGenerator{}
 					tlsCfg.GetCertificate = nil
 				}
+				// conn first, also when the dial fails (upstream left both open): over a dialerProxy stream
+				// tr.Close waits for its read loop, which returns only once the conn is closed
 				qc, err := tr.Dial(ctx, conn.RemoteAddr(), tlsCfg, cfg)
 				if err != nil {
+					conn.Close()
+					tr.Close()
 					return nil, err
 				}
-				context.AfterFunc(qc.Context(), func() { tr.Close(); conn.Close() })
+				context.AfterFunc(qc.Context(), func() { conn.Close(); tr.Close() })
 				switch quicParams.Congestion {
-				case "", "reno":
-				case "bbr":
+				case "bbr", "brutal":
 					congestion.UseBBR(qc, bbr.Profile(quicParams.BbrProfile))
 				case "force-brutal":
 					congestion.UseBrutal(qc, quicParams.BrutalUp, quicParams.BrutalDisableLossCompensation)
-				default:
-					panic(quicParams.Congestion)
 				}
 				return qc, nil
 			},

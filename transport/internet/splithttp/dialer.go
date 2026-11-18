@@ -662,12 +662,14 @@ func dialH3(ctx context.Context, dest net.Destination, streamSettings *internet.
 
 	switch quicParams.Congestion {
 	case "reno":
-	case "", "bbr":
+	case "", "bbr", "brutal":
 		congestion.UseBBR(conn, bbr.Profile(quicParams.BbrProfile))
 	case "force-brutal":
 		congestion.UseBrutal(conn, quicParams.BrutalUp, quicParams.BrutalDisableLossCompensation)
 	default:
-		panic(quicParams.Congestion)
+		// An error, not upstream's panic: one outbound with an unknown value would kill the whole process.
+		_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+		return nil, errors.New("unknown congestion control: ", quicParams.Congestion)
 	}
 
 	return conn, nil

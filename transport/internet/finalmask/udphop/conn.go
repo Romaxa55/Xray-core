@@ -75,7 +75,14 @@ func NewUDPHopConn(c *Config, dest *net.Destination, dialer *finalmask.Dialer) (
 		return nil, err
 	}
 	cur := conn.(*net.PacketConnWrapper).PacketConn
-	addr := conn.RemoteAddr().(*net.UDPAddr)
+	addr, _ := conn.RemoteAddr().(*net.UDPAddr)
+	if addr == nil || addr.IP.IsUnspecified() {
+		// Over a dialerProxy stream the server is reached through the proxy: hop() would dial udp:0.0.0.0 unless
+		// remoteIPs are set (then each hop opens a new proxy stream), and the stream ignores the deadlines recv
+		// relies on. Port hopping stays on sockets only.
+		errors.LogInfo(context.Background(), "no port hopping over a dialerProxy stream")
+		return cur, nil
+	}
 	client := &udpHopConn{
 		dialer: dialer,
 		local:  c.Local,

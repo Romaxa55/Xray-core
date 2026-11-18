@@ -16,9 +16,9 @@ import "sync/atomic"
 // RouteNotifier — функция, вызываемая при изменении маршрута outbound'а.
 //   - outboundTag: имя outbound'а который dial'ит (= exit, например "server-391")
 //   - route:
-//       "via:<tag>" — chain активен, dial идёт через указанный outbound (= bs)
-//       "fallback"  — chain свалился, dial пошёл через DialerProxyFallbackTag
-//       "direct"    — нет dialer_proxy, прямой dial
+//     "via:<tag>" — chain активен, dial идёт через указанный outbound (= bs)
+//     "fallback"  — chain свалился, dial пошёл через DialerProxyFallbackTag
+//     "direct"    — нет dialer_proxy, прямой dial
 //
 // Поведение колл-сайтов:
 //   - dialer.go вызывает с "via:<resolvedTag>" в момент успешного resolve
