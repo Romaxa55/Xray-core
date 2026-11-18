@@ -399,8 +399,14 @@ func (c *OutboundDetourConfig) Build() (*core.OutboundHandlerConfig, error) {
 	if err := validateXDrive(ts, senderSettings.StreamSettings, senderSettings.MultiplexSettings, nil); err != nil {
 		return nil, err
 	}
+	// MegaV fork: upstream refuses VLESS and Trojan without TLS to a public address since
+	// XTLS/Xray-core#6303. The MegaV checker runs this core over public servers and has to
+	// tell a working plaintext server from a dead one (2026-11-18: 386 of 13 217 working;
+	// the exports keep them away from apps and routers, MegaV_checker#98), and what the
+	// fork built before keeps building: the outbound is built and only a warning is
+	// logged, as with allowInsecure.
 	if err := validateOutboundTransportSecurity(rawConfig, senderSettings); err != nil {
-		return nil, err
+		errors.LogWarning(context.Background(), `outbound "`, c.Tag, `" (`, c.Protocol, `) has no TLS to a public address; refused upstream since XTLS/Xray-core#6303, kept enabled in MegaV fork: its traffic is not encrypted.`)
 	}
 
 	if _, ok := ts.(*masque.ClientConfig); !ok && senderSettings.StreamSettings != nil && senderSettings.StreamSettings.ProtocolName == "masque" {
