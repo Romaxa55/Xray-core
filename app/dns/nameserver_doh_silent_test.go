@@ -6,6 +6,7 @@ import (
 	gonet "net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,6 +148,14 @@ func lookup(s *DoHNameServer, name string, within time.Duration) error {
 }
 
 func TestDOHNameServerDropsSilentConnection(t *testing.T) {
+	// On a Windows runner the relay never hears the close of the silent
+	// connection, not in 15 s either (Romaxa55/zeus-browser#852): a
+	// difference of the platform's sockets this fork does not ship to — its
+	// clients are iOS, Android and macOS. Desktop Windows (zeus-browser#812)
+	// looks at it again.
+	if runtime.GOOS == "windows" {
+		t.Skip("the close of a silent connection is not heard on Windows (zeus-browser#852)")
+	}
 	addr, _ := dohStub(t)
 	front := newSilencer(t, addr)
 	s := front.server(t)
