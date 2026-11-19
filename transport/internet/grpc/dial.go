@@ -41,13 +41,14 @@ func init() {
 	internet.RegisterStreamReleaser(releaseClients)
 }
 
-// releaseClients closes the clients dialed with streamSettings and forgets them. A
-// client's key holds its outbound's own stream config, which no later outbound shares:
-// without this, every client of a closed outbound stays for the life of the process,
-// connected or reconnecting to its server with backoff.
+// releaseClients closes the clients dialed with streamSettings and forgets them, at
+// once and with tunnels open, when their outbound closes. A client's key holds its
+// outbound's own stream config, which no later outbound shares; the janitor below
+// would close it too, but only on its next pass and, for a context without an
+// instance, only once its tunnels close.
 func releaseClients(streamSettings *internet.MemoryStreamConfig) {
 	globalDialerAccess.Lock()
-	var clients []*grpc.ClientConn
+	var clients []*grpcClient
 	for conf, client := range globalDialerMap {
 		if conf.MemoryStreamConfig != streamSettings {
 			continue
