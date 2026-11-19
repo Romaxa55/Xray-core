@@ -40,7 +40,7 @@ func TestCloseRacingDialsLeavesNoClient(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		serviceName := fmt.Sprintf("close-racing-dials-%d", i)
 		v, _ := core.New(&core.Config{})
-		v.AddFeature((features_outbound.Manager)(new(outbound.Manager)))
+		v.AddFeature(features_outbound.Manager(new(outbound.Manager)))
 		ctx := context.WithValue(context.Background(), core.XrayKey(1), v)
 		ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
 		h, err := outbound.NewHandler(ctx, &core.OutboundHandlerConfig{

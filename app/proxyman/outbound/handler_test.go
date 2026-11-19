@@ -189,7 +189,7 @@ func TestClosedOutboundReleasesItsStreamAndDialsNoMore(t *testing.T) {
 		released = append(released, c)
 	})
 	v, _ := core.New(&core.Config{})
-	v.AddFeature((outbound.Manager)(new(Manager)))
+	v.AddFeature(outbound.Manager(new(Manager)))
 	ctx := context.WithValue(context.Background(), xrayKey, v)
 	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
 	h, err := NewHandler(ctx, &core.OutboundHandlerConfig{

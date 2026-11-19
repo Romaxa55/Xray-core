@@ -184,6 +184,7 @@ func (c *fallbackDialerConn) SetDeadline(t time.Time) error { return c.current()
 func (c *fallbackDialerConn) SetReadDeadline(t time.Time) error {
 	return c.current().SetReadDeadline(t)
 }
+
 func (c *fallbackDialerConn) SetWriteDeadline(t time.Time) error {
 	return c.current().SetWriteDeadline(t)
 }

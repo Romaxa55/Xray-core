@@ -57,7 +57,7 @@ func FirefoxVersion() int {
 	// at today's top version with no offset so rng=0 == real latest.
 	var timeCurrent int64 = time.Now().Unix() / 86400
 	var timeStart int64 = time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC).Unix() / 86400
-	var timeDiff = timeCurrent - timeStart - int64(math.Floor(math.Pow(globalRng.Float64(), 2)*50))
+	timeDiff := timeCurrent - timeStart - int64(math.Floor(math.Pow(globalRng.Float64(), 2)*50))
 	return int(timeDiff/30) + 151
 }
 
