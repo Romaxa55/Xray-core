@@ -41,7 +41,7 @@ func collected[T any](gone []weak.Pointer[T]) bool {
 func TestDomainRegistryLetsGoOfAClosedInstancesMatchers(t *testing.T) {
 	factories := map[string]func() DomainMatcherFactory{
 		"compact": func() DomainMatcherFactory {
-			return &CompactDomainMatcherFactory{shared: utils.NewWeakCacheMap[string, strmatcher.LinearAnyMatcher]()}
+			return &CompactMphDomainMatcherFactory{shared: utils.NewWeakCacheMap[string, strmatcher.MphValueMatcher]()}
 		},
 		"mph": func() DomainMatcherFactory {
 			return &MphDomainMatcherFactory{shared: utils.NewWeakCacheMap[string, strmatcher.MphValueMatcher]()}
