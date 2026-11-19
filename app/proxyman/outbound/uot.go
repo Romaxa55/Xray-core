@@ -1,3 +1,8 @@
+//go:build !zeus_nogpl
+
+// UDP-over-TCP's server side is github.com/sagernet/sing (GPL-3.0-or-later); a zeus_nogpl build goes without it:
+// uot_nogpl.go.
+
 package outbound
 
 import (
