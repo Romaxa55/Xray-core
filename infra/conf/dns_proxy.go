@@ -7,6 +7,7 @@ import (
 	"github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/proxy/dns"
+	"golang.org/x/net/dns/dnsmessage"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,6 +20,7 @@ type DNSOutboundRuleConfig struct {
 
 func (c *DNSOutboundRuleConfig) Build() (*dns.DNSRuleConfig, error) {
 	rule := &dns.DNSRuleConfig{}
+	rCode := c.RCode
 
 	switch strings.ToLower(c.Action) {
 	case "direct":
@@ -27,6 +29,14 @@ func (c *DNSOutboundRuleConfig) Build() (*dns.DNSRuleConfig, error) {
 		rule.Action = dns.RuleAction_Drop
 	case "return":
 		rule.Action = dns.RuleAction_Return
+	case "reject":
+		// The action of the cores before v26.11.9 (upstream #6214 made it "return", rCode 0 by default):
+		// a config written for them still loads and answers REFUSED, as "reject" did. ZEUS's builds of
+		// an app written for the older core run this one (zeus-browser#1083).
+		rule.Action = dns.RuleAction_Return
+		if rCode == 0 {
+			rCode = uint32(dnsmessage.RCodeRefused)
+		}
 	case "hijack":
 		rule.Action = dns.RuleAction_Hijack
 	default:
@@ -49,10 +59,10 @@ func (c *DNSOutboundRuleConfig) Build() (*dns.DNSRuleConfig, error) {
 		rule.Domain = rules
 	}
 
-	if c.RCode > 65535 {
-		return nil, errors.New("rCode out of range: ", c.RCode)
+	if rCode > 65535 {
+		return nil, errors.New("rCode out of range: ", rCode)
 	}
-	rule.RCode = c.RCode
+	rule.RCode = rCode
 
 	return rule, nil
 }

@@ -241,3 +241,51 @@ func TestDnsProxyConfigRejectsMixedLegacyAndNewFields(t *testing.T) {
 		t.Fatal("expected mixed legacy/new config error, but got ", err)
 	}
 }
+
+// A config written for the cores before v26.11.9 says "reject"; it loads as "return" with their REFUSED answer
+// (zeus-browser#1083), and an rCode it names stays.
+func TestDnsProxyConfigRejectOfOlderCores(t *testing.T) {
+	creator := func() Buildable {
+		return new(DNSOutboundConfig)
+	}
+
+	runMultiTestCase(t, []TestCase{
+		{
+			Input: `{
+				"rules": [
+					{"action": "hijack", "qtype": "1,28"},
+					{"action": "reject"}
+				]
+			}`,
+			Parser: loadJSON(creator),
+			Output: &dns.Config{
+				RewriteServer: &net.Endpoint{},
+				Rule: []*dns.DNSRuleConfig{
+					{
+						Action: dns.RuleAction_Hijack,
+						QType:  []int32{1, 28},
+					},
+					{
+						Action: dns.RuleAction_Return,
+						RCode:  5,
+					},
+				},
+			},
+		},
+		{
+			Input: `{
+				"rules": [{"action": "reject", "rCode": 3}]
+			}`,
+			Parser: loadJSON(creator),
+			Output: &dns.Config{
+				RewriteServer: &net.Endpoint{},
+				Rule: []*dns.DNSRuleConfig{
+					{
+						Action: dns.RuleAction_Return,
+						RCode:  3,
+					},
+				},
+			},
+		},
+	})
+}
