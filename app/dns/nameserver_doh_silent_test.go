@@ -156,9 +156,12 @@ func TestDOHNameServerDropsSilentConnection(t *testing.T) {
 	if err := lookup(s, "b.example.com", time.Second); err == nil {
 		t.Fatal("a query through the silent connection got an answer")
 	}
+	// Within 15 s: the client closes the silent connection right after the
+	// failed query, but a Windows runner tells the relay of the close later
+	// than Linux and macOS do (3 s were not enough there).
 	select {
 	case <-front.closed:
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the connection silent since the failed query stayed open")
 	}
 	if err := lookup(s, "c.example.com", 3*time.Second); err != nil {
